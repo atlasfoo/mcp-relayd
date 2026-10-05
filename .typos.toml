@@ -1,0 +1,39 @@
+[files]
+ignore-hidden = false
+extend-exclude = [
+  ".git/",
+  ".ai/",
+  ".atl/",
+  ".agents/",
+  ".codex/",
+  ".aws/",
+  ".ssh/",
+  ".devenv*",
+  ".direnv/",
+  "vendor/",
+  "bin/",
+  "dist/",
+  "coverage.out",
+  "devenv.lock",
+  "devenv.local.*",
+  "go.sum",
+  "*_generated.go",
+  "*.gen.go",
+  "*.pb.go",
+  "README.md",
+  ".env*",
+  "*.pem",
+  "*.key",
+]
+
+[default]
+locale = "en-us"
+check-filename = true
+check-file = true
+
+[default.extend-words]
+MCP = "MCP"
+ACP = "ACP"
+stdio = "stdio"
+Streamable = "Streamable"
+relayd = "relayd"

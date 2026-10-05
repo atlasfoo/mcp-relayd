@@ -1,6 +1,12 @@
-{ pkgs, ... }:
+{ config, lib, pkgs, ... }:
 {
-  packages = [ pkgs.git ];
+  packages = [
+    pkgs.git
+    pkgs.golangci-lint
+    pkgs.lefthook
+    pkgs.typos
+    pkgs.commitizen
+  ];
 
   languages.go = {
     enable = true;
@@ -16,21 +22,28 @@
       mkdir -p bin
       go build -o bin/mcp-relayd ./cmd/mcp-relayd
     '';
+    fmt.exec = "golangci-lint fmt ./...";
+    lint.exec = ''
+      set -eu
+      golangci-lint fmt --diff ./...
+      golangci-lint run ./...
+    '';
+    spellcheck.exec = "typos --force-exclude .";
     check.exec = ''
       set -eu
-      unformatted=$(gofmt -l cmd)
-      if [ -n "$unformatted" ]; then
-        printf 'Run gofmt on:\n%s\n' "$unformatted"
-        exit 1
-      fi
-      go vet ./...
+      lint
+      spellcheck
       go test ./...
     '';
   };
 
-  enterTest = ''
-    set -eu
-    check
-    test "$(go run ./cmd/mcp-relayd)" = "Hello from mcp-relayd!"
-  '';
+  tasks."mcp-relayd:quality" = lib.mkIf config.devenv.isTesting {
+    before = [ "devenv:enterTest" ];
+    after = [ "devenv:enterShell" ];
+    exec = ''
+      set -eu
+      check
+      test "$(go run ./cmd/mcp-relayd)" = "Hello from mcp-relayd!"
+    '';
+  };
 }

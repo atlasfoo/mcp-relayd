@@ -1,0 +1,21 @@
+glob_matcher: doublestar
+
+pre-commit:
+  parallel: false
+  commands:
+    format:
+      glob: "**/*.go"
+      run: golangci-lint fmt {staged_files}
+      stage_fixed: true
+    spelling:
+      run: typos --force-exclude {staged_files}
+
+commit-msg:
+  commands:
+    conventional-commit:
+      run: cz check --commit-msg-file {1}
+
+pre-push:
+  commands:
+    quality:
+      run: check
