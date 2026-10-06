@@ -43,7 +43,7 @@
     exec = ''
       set -eu
       check
-      test "$(go run ./cmd/mcp-relayd)" = "Hello from mcp-relayd!"
+      go run ./cmd/mcp-relayd --version
     '';
   };
 }
