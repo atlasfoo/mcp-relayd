@@ -37,6 +37,7 @@ formatters:
     - goimports
   settings:
     gofumpt:
+      module-path: mcp-relayd
       extra:
         group-params: true
     goimports:
