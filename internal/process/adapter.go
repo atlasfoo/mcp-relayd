@@ -150,7 +150,16 @@ type execProcess struct {
 	exitErr        error // Written before exited is closed, read only after receiving exited.
 }
 
-func (child *execProcess) Addr() string                   { return child.addr }
+func (child *execProcess) Addr() string { return child.addr }
+func (child *execProcess) PID() int {
+	select {
+	case <-child.exited:
+		return 0
+	default:
+		return child.tree.PID()
+	}
+}
+
 func (child *execProcess) Done() <-chan error             { return child.done }
 func (child *execProcess) Stop(ctx context.Context) error { return child.tree.Stop(ctx) }
 
@@ -217,7 +226,7 @@ func newLogWriter(logger *slog.Logger, server, stream string, environment map[st
 	// Redact longer values first so an overlapping shorter value cannot expose
 	// the remaining part of a longer secret.
 	slices.SortFunc(secrets, func(a, b string) int { return len(b) - len(a) })
-	return &lineLogWriter{logger: logger.With("server", server, "stream", stream), secrets: secrets}
+	return &lineLogWriter{logger: logger.With("server", server, "event", "external_output", "stream", stream), secrets: secrets}
 }
 
 func (writer *lineLogWriter) Write(data []byte) (int, error) {
