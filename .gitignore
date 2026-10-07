@@ -12,3 +12,6 @@ devenv.local.yaml
 # Go build output
 /bin/
 /coverage.out
+
+# Python provisioning tool bytecode
+/scripts/__pycache__/

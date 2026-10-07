@@ -1,12 +1,17 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 
+	"mcp-relayd/internal/app"
 	"mcp-relayd/internal/config"
 )
 
@@ -23,17 +28,27 @@ Options:
   --help         Show this help without loading configuration.
   --version      Show the build version without loading configuration.
 
-This build validates configuration; daemon runtime is not yet available.
 `
 
 func main() {
-	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "mcp-relayd: %v\n", err)
-		os.Exit(1)
+	os.Exit(mainExit())
+}
+
+func mainExit() int {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := runContext(ctx, os.Args[1:], os.Stdout, os.Stderr); err != nil {
+		slog.New(slog.NewJSONHandler(os.Stderr, nil)).Error("daemon stopped with error", "error", err)
+		return 1
 	}
+	return 0
 }
 
 func run(args []string, stdout, stderr io.Writer) error {
+	return runContext(context.Background(), args, stdout, stderr)
+}
+
+func runContext(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
 		_, err := io.WriteString(stdout, usage)
 		return err
@@ -66,9 +81,10 @@ func run(args []string, stdout, stderr io.Writer) error {
 	if !isRun {
 		return errors.New("expected run command; see --help")
 	}
-	if _, err := config.Load(*configPath); err != nil {
+	cfg, err := config.Load(*configPath)
+	if err != nil {
 		return fmt.Errorf("load configuration: %w", err)
 	}
-	_, err := io.WriteString(stdout, "Configuration valid. Daemon runtime is not yet available in this build.\n")
-	return err
+	logger := slog.New(slog.NewJSONHandler(stderr, nil))
+	return app.Run(ctx, cfg, logger)
 }

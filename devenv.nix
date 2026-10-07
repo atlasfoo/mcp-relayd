@@ -6,6 +6,8 @@
     pkgs.lefthook
     pkgs.typos
     pkgs.commitizen
+    pkgs.python313
+    pkgs.uv
   ];
 
   languages.go = {
@@ -15,6 +17,13 @@
 
   # Use the toolchain supplied by Nix rather than downloading another one.
   env.GOTOOLCHAIN = "local";
+
+  # The bridge is an external runtime, never part of the Go build or release.
+  enterShell = ''
+    ${pkgs.python313}/bin/python3 "${config.devenv.root}/scripts/provision-mcp-proxy.py" \
+      --venv "${config.devenv.root}/.devenv/mcp-proxy" || exit $?
+    export PATH="${config.devenv.root}/.devenv/mcp-proxy/bin:$PATH"
+  '';
 
   scripts = {
     run.exec = "go run ./cmd/mcp-relayd";
@@ -43,7 +52,7 @@
     exec = ''
       set -eu
       check
-      go run ./cmd/mcp-relayd --version
+      go test ./internal/integration -run '^TestRuntimeSmoke$' -count=1
     '';
   };
 }
