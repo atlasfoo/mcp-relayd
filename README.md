@@ -1,7 +1,73 @@
 # mcp-relayd
 
-Proyecto Go inicial con un entorno de desarrollo opcional gestionado por
+Daemon Go local que expone servidores MCP stdio mediante un bridge externo. El
+entorno de desarrollo es opcional y está gestionado por
 [devenv](https://devenv.sh/getting-started/) y Nix.
+
+## Runtime local (fase 1)
+
+`mcp-relayd` no incluye el bridge en sus binarios: cada servidor configurado
+usa un proceso externo `mcp-proxy` independiente. La versión soportada es
+`mcp-proxy 0.12.0` con `MCP 1.30.0`; el lock de
+[`tooling/mcp-proxy/requirements.lock`](tooling/mcp-proxy/requirements.lock)
+fija las dependencias transitivas y sus hashes.
+
+### Instalar el bridge
+
+Al entrar en `devenv shell`, Python 3.13 y uv provisionan automáticamente el
+bridge en un entorno dedicado `.devenv/mcp-proxy` desde ese lock.
+Fuera de devenv, instala Python 3.13 y uv, y desde la raíz del repositorio
+ejecuta el mismo provisioner:
+
+```sh
+python3.13 scripts/provision-mcp-proxy.py
+```
+
+En Windows, invoca el script con Python 3.13 (por ejemplo,
+`py -3.13 scripts/provision-mcp-proxy.py`). El provisioner crea o recrea
+`.devenv/mcp-proxy`, instala únicamente wheels con hashes del lock y comprueba
+la versión. Añade su directorio `bin` (Unix) o `Scripts` (Windows) al `PATH`,
+o configura `proxy.command` en el TOML con la ruta absoluta al ejecutable.
+Requiere acceso a PyPI durante la provisión inicial. No uses un entorno Python
+compartido para `--venv`, porque el directorio seleccionado se recrea.
+
+### Configuración y arranque
+
+El archivo predeterminado es global por usuario, independiente del directorio
+actual: `~/.config/mcp-relayd.toml` en Linux y macOS, y
+`%USERPROFILE%\.config\mcp-relayd.toml` en Windows. Crea ese directorio y
+copia [`examples/mcp-relayd.toml`](examples/mcp-relayd.toml) allí. Para usar
+otra ubicación, pasa `--config PATH` explícitamente; las rutas relativas de
+ese override se resuelven desde el directorio actual. Si el archivo elegido
+no existe o no es válido, el daemon falla; no crea configuración ni busca un
+archivo alternativo.
+
+```sh
+mcp-relayd run
+# O bien:
+mcp-relayd run --config ./mcp-relayd.toml
+```
+
+Los campos `command` y `args` de cada servidor se ejecutan como programa y
+argumentos separados, sin shell. La expansión `${VARIABLE}` se aplica solo a
+los valores dentro de `[servers.<nombre>.env]`; no se expande en comandos,
+argumentos, rutas ni otros campos. El gateway escucha por defecto en
+`127.0.0.1:9876`; `GET /health` informa el estado y
+`/mcp/<nombre>` enruta al servidor. Host y Origin se restringen al gateway
+local (Origin puede omitirse). Cada servidor conserva un proxy y una sesión
+upstream compartidos entre las solicitudes de sus clientes; nombres distintos
+tienen rutas y procesos separados. Los logs estructurados JSON se escriben en
+stderr. Al recibir una señal de cierre, el daemon drena HTTP y termina los
+árboles de procesos con un presupuesto global acotado, forzando el cierre si
+vence el plazo.
+
+`autostart = false` mantiene ese servidor detenido; no hay arranque lazy ni
+activación por solicitud. Para iniciarlo, cambia la configuración y reinicia
+el daemon. Esta fase no ofrece reinicio automático, instalación de servidores
+MCP, servicio/autostart del sistema operativo, exposición LAN, bridge nativo,
+ni garantía completa de funciones server-to-client. Las capacidades MCP
+dependen de la versión fijada de `mcp-proxy`. La automatización de workflows,
+builds y releases prevista para fase 5 aún no forma parte del runtime.
 
 ## Empezar con Nix
 
@@ -15,11 +81,15 @@ Desde esta carpeta:
 
 ```sh
 devenv shell
-run
+run run
 ```
 
-El programa imprime `Hello from mcp-relayd!`. La primera activación descarga
-Go, gopls, Git, golangci-lint, Lefthook, typos y Commitizen mediante Nix. `devenv.lock`
+El helper `run` ejecuta `go run ./cmd/mcp-relayd` y reenvía sus argumentos;
+por eso el segundo `run` selecciona el subcomando del daemon. Con Go fuera de
+devenv, invócalo directamente como `go run ./cmd/mcp-relayd run`.
+
+La primera activación descarga Go, gopls, Git, golangci-lint, Lefthook, typos,
+Commitizen, Python 3.13 y uv mediante Nix. `devenv.lock`
 fija las revisiones. Guarda ese archivo en el repositorio para que otros
 desarrolladores usen las mismas revisiones.
 
@@ -146,7 +216,7 @@ desde las revisiones de `devenv.lock`.
 Ejecuta las mismas verificaciones directamente:
 
 ```sh
-go run ./cmd/mcp-relayd
+go run ./cmd/mcp-relayd run
 golangci-lint fmt --diff ./...
 golangci-lint run ./...
 typos --force-exclude .
