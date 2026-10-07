@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"os"
 	"sync"
 	"time"
 
@@ -56,18 +58,36 @@ type Manager struct {
 	proxy           config.Proxy
 	shutdownTimeout time.Duration
 	adapter         Adapter
+	logger          *slog.Logger
 	servers         map[string]*managedServer
 	started         bool
 	stopping        bool
 }
 
 // NewManager constructs a stopped manager from validated configuration.
-func NewManager(cfg config.Config, adapter Adapter) *Manager {
+func NewManager(cfg config.Config, adapter Adapter, loggers ...*slog.Logger) *Manager {
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	if len(loggers) > 0 && loggers[0] != nil {
+		logger = loggers[0]
+	}
 	servers := make(map[string]*managedServer, len(cfg.Servers))
 	for name, server := range cfg.Servers {
 		servers[name] = &managedServer{config: server, state: StateStopped, termination: make(chan struct{}, 1)}
 	}
-	return &Manager{proxy: cfg.Proxy, shutdownTimeout: cfg.Gateway.ShutdownTimeout, adapter: adapter, servers: servers}
+	return &Manager{proxy: cfg.Proxy, shutdownTimeout: cfg.Gateway.ShutdownTimeout, adapter: adapter, logger: logger, servers: servers}
+}
+
+func (m *Manager) logServer(name string, server *managedServer, event, failure string) {
+	attrs := []any{"server", name, "state", string(server.state), "event", event}
+	if child, ok := server.child.(interface{ PID() int }); ok {
+		attrs = append(attrs, "proxy_pid", child.PID())
+	} else {
+		attrs = append(attrs, "proxy_pid", 0)
+	}
+	if failure != "" {
+		attrs = append(attrs, "error", failure)
+	}
+	m.logger.Info("proxy lifecycle", attrs...)
 }
 
 // Start waits for enabled servers to initialize concurrently. Individual launch,
@@ -90,6 +110,7 @@ func (m *Manager) Start(ctx context.Context) error {
 		server.launchDone = make(chan struct{})
 		server.stopObserver = make(chan struct{})
 		server.state = StateStarting
+		m.logServer(name, server, "state", "")
 		workers.Go(func() {
 			defer cancel()
 			m.startServer(startupCtx, name, server)
@@ -123,6 +144,11 @@ func (m *Manager) startServer(ctx context.Context, name string, server *managedS
 	} else if server.state == StateStarting {
 		server.state = StateInitializing
 	}
+	if err != nil || child == nil {
+		m.logServer(name, server, "start_failed", "proxy startup failed")
+	} else {
+		m.logServer(name, server, "state", "")
+	}
 	close(server.launchDone)
 	m.mu.Unlock()
 	if child == nil {
@@ -139,6 +165,11 @@ func (m *Manager) startServer(ctx context.Context, name string, server *managedS
 		server.state = StateFailed
 	} else {
 		server.state = StateReady
+	}
+	if err != nil {
+		m.logServer(name, server, "readiness_failed", "proxy readiness failed")
+	} else {
+		m.logServer(name, server, "state", "")
 	}
 	m.mu.Unlock()
 	if err != nil {
@@ -160,9 +191,19 @@ func (m *Manager) observeExit(server *managedServer, child Process) {
 		} else {
 			server.state = StateFailed
 		}
+		m.logServer(serverName(m.servers, server), server, "exit", "proxy process exited")
 		m.mu.Unlock()
 	case <-server.stopObserver:
 	}
+}
+
+func serverName(servers map[string]*managedServer, target *managedServer) string {
+	for name, server := range servers {
+		if server == target {
+			return name
+		}
+	}
+	return ""
 }
 
 // State returns STOPPED for an unknown or disabled server.
@@ -185,6 +226,21 @@ func (m *Manager) Addr(name string) string {
 	return ""
 }
 
+// ProxyPID returns the proxy PID when the child supports reporting it, or zero
+// for unknown, stopped, or not yet launched servers.
+func (m *Manager) ProxyPID(name string) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	server, ok := m.servers[name]
+	if !ok || server.state == StateStopped || server.child == nil {
+		return 0
+	}
+	if child, ok := server.child.(interface{ PID() int }); ok {
+		return child.PID()
+	}
+	return 0
+}
+
 // Stop cancels startup and terminates active proxies concurrently under one
 // caller deadline. A failed termination remains STOPPING until exit is confirmed.
 func (m *Manager) Stop(ctx context.Context) error {
@@ -198,6 +254,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 		}
 		server.cancelStartup()
 		server.state = StateStopping
+		m.logServer(name, server, "state", "")
 		count++
 		go func() { results <- m.stopServer(ctx, name, server) }()
 	}
@@ -253,7 +310,11 @@ func (m *Manager) terminate(ctx context.Context, name string, server *managedSer
 			server.state = StateStopped
 		}
 		server.observerOnce.Do(func() { close(server.stopObserver) })
+		m.logServer(name, server, "stopped", "")
 		return nil
 	}
-	return fmt.Errorf("stop server %q: %w", name, err)
+	m.logServer(name, server, "stop_failed", "proxy shutdown failed")
+	// Do not return the child error verbatim: it can contain configured values
+	// or protocol bodies that are not safe to expose through manager errors.
+	return fmt.Errorf("stop server %q: proxy shutdown failed", name)
 }
