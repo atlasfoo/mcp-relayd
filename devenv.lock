@@ -14,6 +14,7 @@
         "dir": "src/modules",
         "owner": "cachix",
         "repo": "devenv",
+        "rev": "fe20b5cba7ab5e93ae73f956a8d3efc50e1753f4",
         "type": "github"
       }
     },
@@ -31,8 +32,8 @@
       },
       "original": {
         "owner": "cachix",
-        "ref": "rolling",
         "repo": "devenv-nixpkgs",
+        "rev": "c2f38fe7f9e04d9aadd354d380f2bd40531d9737",
         "type": "github"
       }
     },

@@ -1,0 +1,113 @@
+name: Build
+
+on:
+  workflow_run:
+    workflows: [Checks]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: trusted
+          persist-credentials: false
+
+      # Build NARs never share Checks' writable namespace or live store database.
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        id: nix-cache
+        with:
+          path: ~/nix-cache
+          key: build-nix-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('trusted/devenv.nix', 'trusted/devenv.yaml', 'trusted/devenv.lock') }}
+
+      - uses: cachix/install-nix-action@b85815f71a6de0ddee80b8a80a98d43f4bcc66c7 # v31
+        with:
+          install_url: https://releases.nixos.org/nix/nix-2.28.5/install
+          extra_nix_config: |
+            extra-substituters = file:///home/runner/nix-cache?trusted=1 https://devenv.cachix.org https://cachix.cachix.org
+            extra-trusted-public-keys = devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw= cachix.cachix.org-1:eWNHQldwUO7G2VkjpnjDbWwy4KQ/HNxht7H4SSoMckM=
+
+      - name: Bootstrap pinned devenv
+        run: |
+          nix build github:cachix/devenv-nixpkgs/c2f38fe7f9e04d9aadd354d380f2bd40531d9737#devenv --out-link "$RUNNER_TEMP/devenv-cli"
+          echo "$RUNNER_TEMP/devenv-cli/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: checks-metadata
+          path: checks-artifact
+          run-id: ${{ github.event.workflow_run.id }}
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+
+      - name: Verify exact Checks API run and metadata
+        id: provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECKS_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          cd trusted
+          # Variables expand in the inner trusted devenv shell, not the runner shell.
+          # shellcheck disable=SC2016
+          devenv shell -- bash -euo pipefail -c '
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CHECKS_RUN_ID" > "$RUNNER_TEMP/checks-api.json"
+            python3 - <<"PY"
+          import json, os
+          from pathlib import Path
+          temporary = Path(os.environ["RUNNER_TEMP"])
+          snapshot = dict(repository=os.environ["GITHUB_REPOSITORY"], trigger_run_id=int(os.environ["CHECKS_RUN_ID"]), checks=json.loads((temporary / "checks-api.json").read_text()), metadata=json.loads(Path("../checks-artifact/checks-metadata.json").read_text()), require_checks_attempt=True)
+          (temporary / "provenance-input.json").write_text(json.dumps(snapshot))
+          PY
+            just --justfile justfile workflow-provenance build "$RUNNER_TEMP/provenance-input.json" "$RUNNER_TEMP/provenance.json"
+            python3 - <<"PY"
+          import json, os
+          from pathlib import Path
+          result = json.loads((Path(os.environ["RUNNER_TEMP"]) / "provenance.json").read_text())
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              for key in ("source_sha", "head_repository", "event", "artifact_class"):
+                  output.write(f"{key}={result[key]}\n")
+          PY
+          '
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ steps.provenance.outputs.head_repository }}
+          ref: ${{ steps.provenance.outputs.source_sha }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Package all six targets using only trusted tooling
+        id: package
+        env:
+          CI_JUSTFILE: ${{ github.workspace }}/trusted/justfile
+          RELEASE_BOT_SLUG: ${{ vars.RELEASE_BOT_SLUG }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd trusted
+          devenv shell -- just --justfile "$CI_JUSTFILE" --working-directory "$GITHUB_WORKSPACE/source" ci-build "$RUNNER_TEMP/provenance.json" "$RUNNER_TEMP/build-assets" "$RUNNER_TEMP/build-metadata.json"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.package.outputs.artifact_class || steps.provenance.outputs.artifact_class }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/build-assets
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Export Nix binary cache
+        if: github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository && steps.provenance.outputs.event == 'push' && steps.provenance.outputs.head_repository == github.repository && steps.nix-cache.outputs.cache-matched-key == ''
+        run: nix copy --all --to "file://$HOME/nix-cache"
+
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        if: github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository && steps.provenance.outputs.event == 'push' && steps.provenance.outputs.head_repository == github.repository && steps.nix-cache.outputs.cache-matched-key == ''
+        with:
+          path: ~/nix-cache
+          key: build-nix-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('trusted/devenv.nix', 'trusted/devenv.yaml', 'trusted/devenv.lock') }}
