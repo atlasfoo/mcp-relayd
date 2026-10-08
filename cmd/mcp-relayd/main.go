@@ -17,6 +17,8 @@ import (
 
 var version = "dev"
 
+var sourceSHA = "unknown"
+
 const usage = `Usage: mcp-relayd run [--config PATH]
        mcp-relayd --help
        mcp-relayd --version
@@ -75,7 +77,7 @@ func runContext(ctx context.Context, args []string, stdout, stderr io.Writer) er
 		return err
 	}
 	if *showVersion {
-		_, err := fmt.Fprintf(stdout, "mcp-relayd %s\n", version)
+		_, err := fmt.Fprintf(stdout, "mcp-relayd %s %s\n", version, sourceSHA)
 		return err
 	}
 	if !isRun {

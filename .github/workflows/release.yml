@@ -1,0 +1,173 @@
+name: Release
+
+on:
+  workflow_run:
+    workflows: [Build]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # Build is itself triggered by workflow_run; original push is checked by API.
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'workflow_run' && github.event.workflow_run.head_branch == 'master' && github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CI_JUSTFILE: ${{ github.workspace }}/trusted/justfile
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: trusted
+          persist-credentials: false
+
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        id: nix-cache
+        with:
+          path: ~/nix-cache
+          key: release-nix-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('trusted/devenv.nix', 'trusted/devenv.yaml', 'trusted/devenv.lock') }}
+
+      - uses: cachix/install-nix-action@b85815f71a6de0ddee80b8a80a98d43f4bcc66c7 # v31
+        with:
+          install_url: https://releases.nixos.org/nix/nix-2.28.5/install
+          extra_nix_config: |
+            extra-substituters = file:///home/runner/nix-cache?trusted=1 https://devenv.cachix.org https://cachix.cachix.org
+            extra-trusted-public-keys = devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw= cachix.cachix.org-1:eWNHQldwUO7G2VkjpnjDbWwy4KQ/HNxht7H4SSoMckM=
+
+      - name: Bootstrap pinned devenv
+        run: |
+          nix build github:cachix/devenv-nixpkgs/c2f38fe7f9e04d9aadd354d380f2bd40531d9737#devenv --out-link "$RUNNER_TEMP/devenv-cli"
+          echo "$RUNNER_TEMP/devenv-cli/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: '*-${{ github.event.workflow_run.id }}'
+          merge-multiple: true
+          path: build-assets
+          run-id: ${{ github.event.workflow_run.id }}
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+
+      - name: Verify exact Build and Checks API runs
+        id: provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          cd trusted
+          # shellcheck disable=SC2016
+          devenv shell -- bash -euo pipefail -c '
+            cd "$GITHUB_WORKSPACE"
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID" > "$RUNNER_TEMP/build-api.json"
+            python3 - <<"PY"
+          import json, os, subprocess
+          from pathlib import Path
+          temporary = Path(os.environ["RUNNER_TEMP"])
+          metadata = json.loads(Path("build-assets/build-metadata.json").read_text())
+          checks_id = metadata["checks_run_id"]
+          if type(checks_id) is not int or checks_id <= 0:
+              raise ValueError("invalid Checks ID")
+          repository = os.environ["GITHUB_REPOSITORY"]
+          checks = json.loads(subprocess.check_output(["gh", "api", f"repos/{repository}/actions/runs/{checks_id}"]))
+          snapshot = dict(repository=os.environ["GITHUB_REPOSITORY"], trigger_run_id=int(os.environ["BUILD_RUN_ID"]), checks=checks, build=json.loads((temporary / "build-api.json").read_text()), metadata=metadata, require_chain_binding=True, allow_development_skip=True)
+          (temporary / "provenance-input.json").write_text(json.dumps(snapshot))
+          PY
+            just --justfile trusted/justfile workflow-provenance release "$RUNNER_TEMP/provenance-input.json" "$RUNNER_TEMP/provenance.json"
+            python3 - <<"PY"
+          import json, os
+          from pathlib import Path
+          result = json.loads((Path(os.environ["RUNNER_TEMP"]) / "provenance.json").read_text())
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              for key in ("source_sha", "event", "head_repository", "head_branch"):
+                  output.write(f"{key}={result[key]}\n")
+          PY
+          '
+
+      - name: Read public App bot identity for recovery
+        if: steps.provenance.outputs.event == 'push' && steps.provenance.outputs.head_repository == github.repository && steps.provenance.outputs.head_branch == 'master'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_APP_SLUG: ${{ vars.RELEASE_BOT_SLUG }}
+        run: |
+          cd trusted
+          devenv shell -- python3 - <<'PY'
+          import json, os, re, subprocess
+          slug = os.environ["RELEASE_APP_SLUG"]
+          if slug:
+              if not re.fullmatch(r"[A-Za-z0-9-]+", slug):
+                  raise ValueError("invalid App slug")
+              user = json.loads(subprocess.check_output(["gh", "api", "users/" + slug + "%5Bbot%5D"]))
+              if type(user["id"]) is not int or user["id"] <= 0 or user["login"] != slug + "[bot]":
+                  raise ValueError("invalid bot identity")
+              with open(os.environ["GITHUB_ENV"], "a") as output:
+                  output.write(f"RELEASE_BOT_NAME={slug}[bot]\nRELEASE_BOT_EMAIL={user['id']}+{slug}[bot]@users.noreply.github.com\n")
+          PY
+
+      - name: Validate artifacts, eligibility and refreshed refs without App
+        if: steps.provenance.outputs.event == 'push' && steps.provenance.outputs.head_repository == github.repository && steps.provenance.outputs.head_branch == 'master'
+        id: preflight
+        env:
+          RELEASE_PREFLIGHT_ONLY: '1'
+          RELEASE_READ_TOKEN: ${{ github.token }}
+        run: |
+          cd trusted
+          # shellcheck disable=SC2016
+          devenv shell -- bash -euo pipefail -c '
+            cd "$GITHUB_WORKSPACE"
+            git init "$RUNNER_TEMP/release-input"
+            git -C "$RUNNER_TEMP/release-input" remote add origin "https://github.com/$GITHUB_REPOSITORY.git"
+            just --justfile trusted/justfile --working-directory "$RUNNER_TEMP/release-input" ci-release "$RUNNER_TEMP/provenance.json" "$GITHUB_WORKSPACE/build-assets" "$RUNNER_TEMP/preflight.json"
+          '
+
+      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        if: steps.preflight.outputs.ready == 'true'
+        id: app-token
+        with:
+          app-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+
+      - name: Derive actual App git identity and publish recoverably
+        if: steps.preflight.outputs.ready == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          RELEASE_READ_TOKEN: ${{ github.token }}
+        run: |
+          cd trusted
+          # shellcheck disable=SC2016
+          devenv shell -- bash -euo pipefail -c '
+            cd "$GITHUB_WORKSPACE"
+            python3 - <<"PY"
+          import json, os, re, subprocess
+          from pathlib import Path
+          slug = os.environ["RELEASE_APP_SLUG"]
+          if not re.fullmatch(r"[A-Za-z0-9-]+", slug):
+              raise ValueError("invalid App slug")
+          user = json.loads(subprocess.check_output(["gh", "api", "users/" + slug + "%5Bbot%5D"]))
+          if type(user["id"]) is not int or user["id"] <= 0 or user["login"] != slug + "[bot]":
+              raise ValueError("invalid App bot")
+          user_id = user["id"]
+          env = dict(os.environ, RELEASE_BOT_NAME=slug + "[bot]", RELEASE_BOT_EMAIL=f"{user_id}+{slug}[bot]@users.noreply.github.com")
+          subprocess.run(["just", "--justfile", "trusted/justfile", "--working-directory", str(Path(os.environ["RUNNER_TEMP"]) / "release-input"), "ci-release", str(Path(os.environ["RUNNER_TEMP"]) / "provenance.json"), str(Path.cwd() / "build-assets"), str(Path(os.environ["RUNNER_TEMP"]) / "publication.json")], env=env, check=True)
+          PY
+          '
+
+      - name: Export Nix binary cache
+        if: steps.provenance.outputs.event == 'push' && steps.provenance.outputs.head_repository == github.repository && steps.nix-cache.outputs.cache-matched-key == ''
+        run: nix copy --all --to "file://$HOME/nix-cache"
+
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        if: steps.provenance.outputs.event == 'push' && steps.provenance.outputs.head_repository == github.repository && steps.nix-cache.outputs.cache-matched-key == ''
+        with:
+          path: ~/nix-cache
+          key: release-nix-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('trusted/devenv.nix', 'trusted/devenv.yaml', 'trusted/devenv.lock') }}

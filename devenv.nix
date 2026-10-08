@@ -2,10 +2,15 @@
 {
   packages = [
     pkgs.git
+    pkgs.just
+    pkgs.bash
     pkgs.golangci-lint
     pkgs.lefthook
     pkgs.typos
     pkgs.commitizen
+    pkgs.gh
+    pkgs.actionlint
+    # The self-contained just release recipes use Python's tar/zip/gzip/hashlib.
     pkgs.python313
     pkgs.uv
   ];

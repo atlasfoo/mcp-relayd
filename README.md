@@ -226,3 +226,116 @@ go build -o bin/mcp-relayd ./cmd/mcp-relayd
 
 Los hooks usan los comandos del entorno devenv; usa `devenv shell` cuando
 vayas a instalar o ejecutar los hooks.
+
+## Workflows, builds y distribución
+
+Los workflows usan el entorno declarativo de Nix/devenv: `devenv.nix`,
+`devenv.yaml` y `devenv.lock` fijan herramientas y revisiones. En cada runner
+de GitHub Actions se instala la versión fijada de Nix y se construye devenv
+desde su revisión bloqueada. Las cachés NAR de Checks, Build y Release son
+independientes; sus claves incluyen sistema, arquitectura y el hash de esos
+tres archivos de configuración. No comparten una base viva de `/nix/store`.
+Checks solo restaura caché en pull requests y solo guarda desde un push; Build
+y Release usan sus propios espacios. Sus ejecuciones son `workflow_run`, pero
+solo guardan caché cuando la ejecución de Checks original verificada por API
+era un push confiable. Una caché fría no debería cambiar la corrección, pero
+todavía no se ha verificado su comportamiento en runners alojados.
+
+La secuencia predeterminada tiene tres workflows independientes:
+
+1. **Checks** corre en pull requests y pushes a `master`, valida el SHA exacto
+   del código, los commits/título y las comprobaciones. No necesita la GitHub
+   App para los builds de desarrollo.
+2. **Build** se dispara al completarse Checks con éxito (`workflow_run`),
+   verifica la ejecución y sus metadatos mediante la API y empaqueta el SHA
+   comprobado. El `push` original a `master` se verifica en la ejecución de
+   Checks consultada por API: el evento de Build en sí es `workflow_run`, no
+   `push`.
+3. **Release** se dispara al completarse Build con éxito (`workflow_run`) y
+   vuelve a verificar la cadena Checks/Build y los artefactos. Solo una fuente
+   elegible de un push propio a `master` puede publicarse.
+
+Build produce seis archivos: `mcp-relayd_<versión>_{linux,darwin,windows}_
+{amd64,arm64}.{tar.gz,zip}` (Windows usa ZIP; Linux y macOS, tar.gz), más un
+manifiesto con hashes SHA-256 y metadatos del origen. Los binarios Go son
+cruzados con `CGO_ENABLED=0`; no incluyen `mcp-proxy`, que sigue siendo un
+componente externo. El Release público contiene esos seis paquetes y
+`SHA256SUMS`. Descárgalos desde **Releases** del repositorio y verifica los
+paquetes con `sha256sum -c SHA256SUMS` (en macOS puede usarse
+`shasum -a 256 -c SHA256SUMS`).
+
+Una fuente elegible requiere al menos un `feat` o `fix` desde la última
+etiqueta, con un incremento SemVer calculado por Commitizen. Build empaqueta
+la versión candidata antes de que exista el commit/tag de bump; Release crea
+después ese commit de versión y publica los mismos bytes bajo la nueva
+versión. Un push sin `feat`/`fix` exitoso crea un build `dev` y Release lo
+omite sin requerir la App. También se omiten candidatos obsoletos si `master`
+o la última etiqueta cambiaron. Un candidato obsoleto no se vuelve publicable
+al reejecutar su Release antiguo: se necesitan nuevos Checks y Build para el
+estado actual de `master`. Reejecuta el mismo workflow Release solo para
+recuperar una publicación parcial o un error transitorio, cuando sus refs
+siguen siendo válidas. Etiquetas, commits de bump o assets remotos
+conflictivos hacen fallar la publicación en vez de sobrescribirse. La
+publicación se serializa por repositorio, pero el workflow no declara un
+GitHub Actions Environment protegido. Configurar un Environment protegido en
+GitHub no basta por sí solo: también hay que asociarlo al job `release` en
+`.github/workflows/release.yml` para exigir aprobación a ese job.
+
+### Configuración de la GitHub App
+
+Para una release elegible configura estas variables/secretos del repositorio:
+
+| Nombre | Tipo | Uso |
+| --- | --- | --- |
+| `RELEASE_APP_CLIENT_ID` | Variable | Client ID/App ID de la GitHub App, pasado al input `app-id` de la acción de token. |
+| `RELEASE_APP_PRIVATE_KEY` | Secreto | Clave privada de la App; no la pegues en código, issues ni logs. |
+| `RELEASE_BOT_SLUG` | Variable pública | Slug de la App; identifica commits de bump propios y permite reconocer/reanudar una publicación. |
+
+Instala la App únicamente en este repositorio con permiso **Contents: write**.
+Si las reglas de protección/ruleset de `master` bloquean el push automatizado,
+un administrador debe configurar manualmente el bypass correspondiente para
+la identidad de la App. No se requiere pegar claves ni tokens en el ruleset.
+La identidad pública inicial de los commits de bump se obtiene del slug; en
+la publicación, la ejecución deriva la identidad del `app-slug` real del token
+de App y su API pública. Por eso `RELEASE_BOT_SLUG` es necesario para la
+supresión y recuperación correctas, además de configurar el ID y la clave.
+
+### Recetas locales de build y verificación
+
+Ejecuta las recetas en `devenv shell` desde la raíz. Las recetas de candidato,
+preflight y verificación solo escriben el JSON de salida solicitado; no
+publican. Define argumentos con valores apropiados para tu checkout:
+
+```sh
+# Inspeccionar si HEAD produciría una versión, sin cambiar refs ni archivos fuente.
+just release-candidate /tmp/candidate.json
+
+# Empaquetar seis targets con la versión/SHA/run elegidos y producir manifiesto.
+mkdir -p /tmp/opencode
+VERSION=0.1.0
+SOURCE_SHA="$(git rev-parse HEAD)"
+RUN_ID=local
+ASSETS=/tmp/opencode/mcp-relayd-assets
+just release-package "$VERSION" "$SOURCE_SHA" "$RUN_ID" "$ASSETS" /tmp/opencode/package.json
+
+# Validar los seis archivos contra manifest.json, sin extraerlos.
+just release-verify "$ASSETS" /tmp/opencode/verified.json
+
+# Preflight de refs ya descargadas; solo informa si source y última etiqueta siguen actuales.
+LAST_TAG="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+just release-preflight "$SOURCE_SHA" "$LAST_TAG" /tmp/opencode/preflight.json
+```
+
+`release-preflight` requiere refs actualizadas previamente (`origin/master` y
+tags); no las descarga. Para un preflight completo de la publicación CI se
+usa `ci-release` con provenance, assets y salida; esa receta consulta el
+remoto y puede escribir en `master`, crear tags/releases y subir assets. No la
+ejecutes como receta casual local ni con credenciales sin protección. En GitHub,
+la publicación elegible está separada tras el preflight sin App; si se necesita
+aprobación humana, protege el Environment antes de asociarlo al job Release.
+
+La primera activación de Nix/dev-env y los binarios cruzados macOS/Windows no
+se han validado en runners nativos; la compilación cruzada Go se ejecuta en
+Linux. La verificación real de la identidad/instalación de App, cachés y
+artefactos de Actions queda pendiente de una ejecución alojada después del
+merge.
