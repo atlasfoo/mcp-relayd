@@ -37,3 +37,5 @@ ACP = "ACP"
 stdio = "stdio"
 Streamable = "Streamable"
 relayd = "relayd"
+# Nix's binary-cache directory name.
+realisations = "realisations"

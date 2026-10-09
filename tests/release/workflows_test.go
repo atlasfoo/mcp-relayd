@@ -5,6 +5,7 @@ package release_test
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -171,6 +172,103 @@ func TestWorkflowsLockedEnvironmentAndReadOnlyPRCache(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestWorkflowsPrepareRunnerOwnedNixCache(t *testing.T) {
+	for _, name := range []string{"checks", "build", "release"} {
+		t.Run(name, func(t *testing.T) {
+			workflow := loadWorkflow(t, name)
+			for _, job := range workflow.Jobs {
+				restore, prepare, install := -1, -1, -1
+				var script string
+				for index, step := range job.Steps {
+					switch {
+					case strings.HasPrefix(step.Uses, "actions/cache/restore@"):
+						restore = index
+					case step.ID == "prepare-nix-cache":
+						prepare, script = index, step.Run
+						if step.If != "" {
+							t.Error("cache preparation must also run on PRs and cache hits")
+						}
+					case strings.HasPrefix(step.Uses, "cachix/install-nix-action@"):
+						install = index
+					}
+				}
+				if restore < 0 || prepare <= restore || install <= prepare || script == "" {
+					t.Fatal("prepare the binary cache after restore and before Nix can open it as root")
+				}
+				for _, warm := range []bool{false, true} {
+					home := t.TempDir()
+					t.Setenv("HOME", home)
+					cache := filepath.Join(home, "nix-cache")
+					marker := filepath.Join(cache, "nar", "existing.nar.xz")
+					if warm {
+						if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil { // #nosec G301 -- public NAR cache fixture, readable by the Nix daemon.
+							t.Fatal(err)
+						}
+						write(t, marker, "cached NAR", 0o644)
+						if err := os.Chmod(filepath.Dir(marker), 0o555); err != nil { // #nosec G302 -- intentionally read-only restored cache fixture, no secrets.
+							t.Fatal(err)
+						}
+					}
+					// Exercise the actual workflow script, not a test-only preparation helper.
+					command := exec.CommandContext(t.Context(), "bash", "-euo", "pipefail", "-c", script) // #nosec G204 -- fixed workflow scripts under test, no external input.
+					if output, err := command.CombinedOutput(); err != nil {
+						t.Fatalf("prepare cache (warm=%v): %v: %s", warm, err, output)
+					}
+					for _, directory := range []string{"", "nar", "realisations", "log"} { //nolint:misspell // Nix's on-disk directory name uses British spelling.
+						path := filepath.Join(cache, directory)
+						info, err := os.Stat(path)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if !info.IsDir() || info.Mode().Perm() != 0o755 {
+							t.Errorf("cache directory %s must be readable but writable only by its owner: %v", directory, info.Mode())
+						}
+						write(t, filepath.Join(path, "export.tmp"), "new NAR", 0o644)
+					}
+					if warm {
+						data, err := os.ReadFile(marker) // #nosec G304 -- fixed NAR fixture under t.TempDir.
+						if err != nil || string(data) != "cached NAR" {
+							t.Fatalf("preparation changed restored NAR: %q, %v", data, err)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestWorkflowsNode24ActionPins(t *testing.T) {
+	// These upstream manifests were verified to declare node24 (Nix is composite).
+	pins := map[string]string{
+		"actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09":                "v5.1.0",
+		"actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25":           "v5.1.0",
+		"actions/cache/save@caa296126883cff596d87d8935842f9db880ef25":              "v5.1.0",
+		"actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f":         "v6.0.0",
+		"actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131":       "v7.0.0",
+		"actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859": "v3.0.0",
+	}
+	for _, name := range []string{"checks", "build", "release"} {
+		workflow := loadWorkflow(t, name)
+		data, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", name+".yml")) // #nosec G304 -- fixed workflow names.
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, job := range workflow.Jobs {
+			for _, step := range job.Steps {
+				if !strings.HasPrefix(step.Uses, "actions/") {
+					continue
+				}
+				version, ok := pins[step.Uses]
+				if !ok {
+					t.Errorf("%s: action must use a verified Node.js 24 SHA: %s", name, step.Uses)
+				} else if !strings.Contains(string(data), step.Uses+" # "+version+"\n") {
+					t.Errorf("%s: pinned action lacks its readable release version: %s", name, step.Uses)
+				}
+			}
+		}
 	}
 }
 
