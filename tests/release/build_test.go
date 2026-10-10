@@ -4,12 +4,174 @@ package release_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+// Exercise the actual orchestration boundary, not just the candidate JSON:
+// a successful no-increment decision must never fall through to development packaging.
+func TestCIBuildEarlyEligibility(t *testing.T) {
+	for _, scenario := range []string{"docs-ci", "bootstrap-docs-ci", "no-increment", "unchanged-version", "commitizen-error", "get-next-error", "docs-after-feature", "ci-after-fix", "stale-source", "stale-tag"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newFixture(t)
+			if scenario != "bootstrap-docs-ci" {
+				f.git(t, "commit", "--allow-empty", "-m", "feat: published baseline")
+				f.git(t, "tag", "v0.1.0")
+			}
+			if scenario != "docs-ci" && scenario != "bootstrap-docs-ci" {
+				message := "feat: unreleased relay"
+				if scenario == "ci-after-fix" {
+					message = "fix: unreleased stream correction"
+				}
+				f.git(t, "commit", "--allow-empty", "-m", message)
+			}
+			write(t, filepath.Join(f.dir, "usage.md"), "Offline usage documentation\n", 0o600)
+			f.git(t, "add", "usage.md")
+			f.git(t, "commit", "-m", "docs: explain usage")
+			write(t, filepath.Join(f.dir, "ci-config.yml"), "checks: enabled\n", 0o600)
+			f.git(t, "add", "ci-config.yml")
+			f.git(t, "commit", "-m", "ci: adjust checks")
+			source := f.git(t, "rev-parse", "HEAD")
+			f.git(t, "update-ref", "refs/remotes/origin/master", source)
+			if scenario == "stale-source" {
+				f.git(t, "commit", "--allow-empty", "-m", "fix: newer source")
+				f.git(t, "update-ref", "refs/remotes/origin/master", f.git(t, "rev-parse", "HEAD"))
+				f.git(t, "checkout", "--detach", source)
+			}
+			if scenario == "stale-tag" {
+				f.git(t, "tag", "v0.1.1")
+			}
+			dryCode, nextCode, version := 0, 0, "0.2.0"
+			switch scenario {
+			case "no-increment":
+				dryCode = 21
+			case "unchanged-version":
+				version = "0.1.0"
+			case "commitizen-error":
+				dryCode = 99
+			case "get-next-error":
+				nextCode = 1
+			case "ci-after-fix":
+				version = "0.1.1"
+			}
+			eligible := scenario == "docs-after-feature" || scenario == "ci-after-fix"
+			var czLog string
+			if eligible {
+				f.env = append(f.env, "RELEASE_BOT_NAME="+publicationBotName, "RELEASE_BOT_EMAIL="+publicationBotEmail)
+				// Real Commitizen also permits Build's planned local bump preparation.
+				recorder := &publicationFixture{fixture: f}
+				czLog = recorder.recordCZ(t)
+				f = recorder.fixture
+			} else {
+				czLog = f.mockCZ(t, dryCode, version, nextCode)
+			}
+			packageLog := recordBuildPackaging(t, &f)
+			goPath := installMockGo(t, &f, "linux", "amd64")
+			if eligible {
+				guard := filepath.Join(t.TempDir(), "go")
+				write(t, guard, fmt.Sprintf(`#!/bin/sh
+set -eu
+test -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}${RELEASE_READ_TOKEN:-}${RELEASE_GIT_TOKEN:-}"
+test "$(git rev-parse HEAD)" = %q
+bump=$(git rev-parse %q)
+test "$(git show -s --format=%%P "$bump")" = %q
+exec %q "$@"
+`, source, "v"+version, source, goPath), 0o700)
+				f.env = append(f.env, "GO="+guard, "GH_TOKEN=offline-placeholder", "GITHUB_TOKEN=offline-placeholder", "RELEASE_READ_TOKEN=offline-placeholder", "RELEASE_GIT_TOKEN=offline-placeholder")
+			}
+			directory := t.TempDir()
+			input, output, assets := filepath.Join(directory, "provenance.json"), filepath.Join(directory, "output.json"), filepath.Join(directory, "assets")
+			writePublicationJSON(t, input, map[string]any{"verified": true, "repository": "owner/mcp-relayd", "head_repository": "owner/mcp-relayd", "event": "push", "head_branch": "master", "checks_run_id": 101, "source_sha": source, "last_tag": "v0.1.0"})
+			trusted := filepath.Join(t.TempDir(), "justfile")
+			write(t, trusted, read(t, filepath.Join(f.dir, "justfile")), 0o600)
+			f.env = append(f.env, "CI_JUSTFILE="+trusted, "GITHUB_RUN_ID=202")
+			before := f.snapshot(t)
+			logs, err := f.command(t, "just", "--justfile", trusted, "--working-directory", f.dir, "ci-build", input, assets, output)
+			if eligible {
+				if err != nil {
+					t.Fatalf("unreleased feat/fix lost after docs/CI push: %v: %s", err, logs)
+				}
+				var got candidate
+				decode(t, read(t, output), &got)
+				if !got.Eligible || got.Version != version || got.Source != source || read(t, packageLog) == "" || read(t, czLog) == "" {
+					t.Fatalf("unreleased candidate not packaged with original source/version: %+v", got)
+				}
+				var metadata map[string]any
+				decode(t, read(t, output), &metadata)
+				bump := f.git(t, "rev-parse", "v"+version+"^{commit}")
+				if metadata["bump_sha"] != bump || metadata["tag"] != "v"+version || f.git(t, "rev-parse", "HEAD") != source || f.git(t, "rev-parse", "refs/remotes/origin/master") != source {
+					t.Fatal("Build must retain local canonical bump/tag without moving tested source or remote refs")
+				}
+				var manifest map[string]any
+				decode(t, read(t, filepath.Join(assets, "manifest.json")), &manifest)
+				for _, key := range []string{"source_sha", "bump_sha", "tag", "version", "eligible"} {
+					if manifest[key] != metadata[key] {
+						t.Fatalf("manifest lost %s", key)
+					}
+				}
+				return
+			}
+			wantError := scenario == "commitizen-error" || scenario == "get-next-error"
+			if wantError && err == nil {
+				t.Errorf("real Commitizen error was treated as a successful skip")
+			} else if !wantError && err != nil {
+				t.Errorf("normal skip failed: %v: %s", err, logs)
+			}
+			assertBuildDidNotPackage(t, packageLog, goPath, output, assets)
+			if !reflect.DeepEqual(before, f.snapshot(t)) {
+				t.Error("skipped/failed Build mutated candidate history or refs")
+			}
+			if (scenario == "docs-ci" || scenario == "bootstrap-docs-ci") && read(t, czLog) != "" {
+				t.Error("docs/CI-only history invoked Commitizen")
+			}
+		})
+	}
+}
+
+// Record delegated packaging calls while executing the real just recipes.
+func recordBuildPackaging(t *testing.T, f *fixture) string {
+	t.Helper()
+	justPath, err := f.command(t, "sh", "-c", "command -v just")
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	log := filepath.Join(directory, "calls")
+	write(t, log, "", 0o600)
+	write(t, filepath.Join(directory, "just"), fmt.Sprintf(`#!/usr/bin/env python3
+import os, sys
+if 'release-package' in sys.argv[1:]:
+    with open(%q, 'a', encoding='utf-8') as output:
+        output.write('release-package\n')
+os.execv(%q, [%q, *sys.argv[1:]])
+`, log, justPath, justPath), 0o700)
+	for i, entry := range f.env {
+		if path, ok := strings.CutPrefix(entry, "PATH="); ok {
+			f.env[i] = "PATH=" + directory + ":" + path
+		}
+	}
+	return log
+}
+
+func assertBuildDidNotPackage(t *testing.T, packageLog, goPath, output, assets string) {
+	t.Helper()
+	if read(t, packageLog) != "" {
+		t.Error("skipped/failed Build invoked release-package")
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(goPath), "calls")); !os.IsNotExist(err) {
+		t.Error("skipped/failed Build invoked Go")
+	}
+	if _, err := os.Stat(output); !os.IsNotExist(err) {
+		t.Error("skipped/failed Build wrote completion metadata")
+	}
+	if _, err := os.Stat(assets); !os.IsNotExist(err) {
+		t.Error("skipped/failed Build created asset directory")
+	}
+}
 
 func TestBuildWorkflowTrustedEnvironmentBoundary(t *testing.T) {
 	workflow := loadWorkflow(t, "build")
@@ -37,8 +199,11 @@ func TestBuildWorkflowTrustedEnvironmentBoundary(t *testing.T) {
 			}
 			if strings.HasPrefix(step.Uses, "actions/cache/") {
 				key := step.With["key"]
-				if !strings.HasPrefix(key, "build-nix-") || !strings.Contains(key, "trusted/devenv.nix") || !strings.Contains(key, "trusted/devenv.yaml") || !strings.Contains(key, "trusted/devenv.lock") {
-					t.Fatal("Build cache must not share Checks namespace or hash candidate inputs")
+				if !strings.HasPrefix(key, "nix-env-v2-") || !strings.Contains(key, "trusted/devenv.nix") || !strings.Contains(key, "trusted/devenv.yaml") || !strings.Contains(key, "trusted/devenv.lock") {
+					t.Fatal("Build must restore the shared Nix cache using trusted environment inputs")
+				}
+				if !strings.HasPrefix(step.Uses, "actions/cache/restore@") {
+					t.Fatal("Build must never save the shared Nix cache")
 				}
 			}
 		}
@@ -81,7 +246,15 @@ func TestCIBuildClassificationAndTrustedRecipes(t *testing.T) {
 			if scenario == "master-feature" || scenario == "package-error" {
 				czCode = 0
 			}
-			czLog := f.mockCZ(t, czCode, "0.2.0", 0)
+			var czLog string
+			if czCode == 0 {
+				f.env = append(f.env, "RELEASE_BOT_NAME="+publicationBotName, "RELEASE_BOT_EMAIL="+publicationBotEmail)
+				recorder := &publicationFixture{fixture: f}
+				czLog = recorder.recordCZ(t)
+				f = recorder.fixture
+			} else {
+				czLog = f.mockCZ(t, czCode, "0.2.0", 0)
+			}
 			goPath := installMockGo(t, &f, "linux", "amd64")
 			if scenario == "package-error" {
 				write(t, goPath, "#!/bin/sh\nexit 98\n", 0o700)
@@ -96,7 +269,7 @@ func TestCIBuildClassificationAndTrustedRecipes(t *testing.T) {
 			write(t, input, string(data), 0o600)
 			before := f.snapshot(t)
 			logs, err := f.command(t, "just", "--justfile", trusted, "--working-directory", f.dir, "ci-build", input, assets, output)
-			if after := f.snapshot(t); !reflect.DeepEqual(before, after) {
+			if after := f.snapshot(t); scenario != "master-feature" && scenario != "package-error" && !reflect.DeepEqual(before, after) {
 				t.Fatal("ci-build mutated candidate repository")
 			}
 			if scenario == "wrong-source" || scenario == "candidate-error" || scenario == "package-error" {
@@ -110,6 +283,15 @@ func TestCIBuildClassificationAndTrustedRecipes(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatalf("ci-build: %v: %s", err, logs)
+			}
+			if scenario != "master-feature" {
+				if _, err := os.Stat(output); !os.IsNotExist(err) {
+					t.Fatal("ineligible origin wrote completion metadata")
+				}
+				if _, err := os.Stat(assets); !os.IsNotExist(err) || read(t, czLog) != "" {
+					t.Fatal("ineligible origin packaged or invoked Commitizen")
+				}
+				return
 			}
 			var got struct {
 				Source   string `json:"source_sha"`

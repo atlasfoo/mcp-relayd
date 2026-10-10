@@ -232,28 +232,35 @@ vayas a instalar o ejecutar los hooks.
 Los workflows usan el entorno declarativo de Nix/devenv: `devenv.nix`,
 `devenv.yaml` y `devenv.lock` fijan herramientas y revisiones. En cada runner
 de GitHub Actions se instala la versión fijada de Nix y se construye devenv
-desde su revisión bloqueada. Las cachés NAR de Checks, Build y Release son
-independientes; sus claves incluyen sistema, arquitectura y el hash de esos
+desde su revisión bloqueada. Checks, Build y Release comparten una caché binaria
+NAR bajo `nix-env-v2`; su clave incluye sistema, arquitectura y el hash de esos
 tres archivos de configuración. No comparten una base viva de `/nix/store`.
-Checks solo restaura caché en pull requests y solo guarda desde un push; Build
-y Release usan sus propios espacios. Sus ejecuciones son `workflow_run`, pero
-solo guardan caché cuando la ejecución de Checks original verificada por API
-era un push confiable. Una caché fría no debería cambiar la corrección, pero
-todavía no se ha verificado su comportamiento en runners alojados.
+Checks es el único escritor: exporta y guarda tras un push exitoso a `master`,
+si la clave todavía no existe. Los pull requests, Build y Release solo restauran
+la caché. Build y Release calculan el hash desde su checkout de tooling confiable
+en `trusted/`; si el entorno difiere, la clave también cambia. Una caché fría no
+debería cambiar la corrección; su reutilización entre workflows alojados sigue
+pendiente de verificación. La provisión Python de `mcp-proxy` no forma parte de
+esta caché NAR y sigue ejecutándose al entrar en el shell.
 
-La secuencia predeterminada tiene tres workflows independientes:
+La secuencia predeterminada conecta tres workflows; Release es reusable y se
+ejecuta dentro del mismo run de Build:
 
 1. **Checks** corre en pull requests y pushes a `master`, valida el SHA exacto
    del código, los commits/título y las comprobaciones. No necesita la GitHub
    App para los builds de desarrollo.
-2. **Build** se dispara al completarse Checks con éxito (`workflow_run`),
-   verifica la ejecución y sus metadatos mediante la API y empaqueta el SHA
+2. **Build** solo ejecuta su job tras Checks exitoso de un `push` propio a
+   `master` (`workflow_run`); los pull requests ejecutan únicamente Checks.
+   Verifica la ejecución y sus metadatos mediante la API y empaqueta el SHA
    comprobado. El `push` original a `master` se verifica en la ejecución de
    Checks consultada por API: el evento de Build en sí es `workflow_run`, no
    `push`.
-3. **Release** se dispara al completarse Build con éxito (`workflow_run`) y
-   vuelve a verificar la cadena Checks/Build y los artefactos. Solo una fuente
-   elegible de un push propio a `master` puede publicarse.
+3. **Release** (`workflow_call`) solo se llama tras el push privilegiado
+   exitoso del job `push` de Build. Verifica la cadena y descarga el artifact
+   exacto por ID; no tiene disparador ni concurrencia independiente.
+
+El [diagrama Mermaid paso a paso](docs/actions-flow.md) muestra el orden actual,
+las decisiones de publicación y los puntos pendientes de refinamiento.
 
 Build produce seis archivos: `mcp-relayd_<versión>_{linux,darwin,windows}_
 {amd64,arm64}.{tar.gz,zip}` (Windows usa ZIP; Linux y macOS, tar.gz), más un
@@ -265,21 +272,20 @@ paquetes con `sha256sum -c SHA256SUMS` (en macOS puede usarse
 `shasum -a 256 -c SHA256SUMS`).
 
 Una fuente elegible requiere al menos un `feat` o `fix` desde la última
-etiqueta, con un incremento SemVer calculado por Commitizen. Build empaqueta
-la versión candidata antes de que exista el commit/tag de bump; Release crea
-después ese commit de versión y publica los mismos bytes bajo la nueva
-versión. Un push sin `feat`/`fix` exitoso crea un build `dev` y Release lo
-omite sin requerir la App. También se omiten candidatos obsoletos si `master`
-o la última etiqueta cambiaron. Un candidato obsoleto no se vuelve publicable
-al reejecutar su Release antiguo: se necesitan nuevos Checks y Build para el
-estado actual de `master`. Reejecuta el mismo workflow Release solo para
-recuperar una publicación parcial o un error transitorio, cuando sus refs
-siguen siendo válidas. Etiquetas, commits de bump o assets remotos
-conflictivos hacen fallar la publicación en vez de sobrescribirse. La
-publicación se serializa por repositorio, pero el workflow no declara un
-GitHub Actions Environment protegido. Configurar un Environment protegido en
-GitHub no basta por sí solo: también hay que asociarlo al job `release` en
-`.github/workflows/release.yml` para exigir aprobación a ese job.
+etiqueta, incluso si el último push solo cambia docs/CI. Sin incremento, Build
+termina correctamente antes de crear bump, paquetes o artifacts y no llama a
+Release. Un fallo de compilación o upload tampoco permite publicar refs remotas.
+Build calcula la versión con Commitizen, crea localmente el commit y
+tag de bump canónicos con `[skip ci]` y empaqueta los seis binarios. El job
+`push` publica únicamente los refs verificados; Release publica después los
+assets, sin ejecutar Commitizen ni mutar Git. Un bump propio no inicia otro
+ciclo de build; los candidatos obsoletos requieren nuevos Checks y Build.
+Reintenta el mismo Build para recuperar una publicación parcial cuando sus
+refs siguen vigentes. Los checks requeridos pueden quedar pendientes tras el
+skip nativo; el bypass de las reglas de `master` para la App es un prerequisito
+externo, además de instalarla con `Contents: write` y configurar sus variables
+y secreto como se describe abajo. La publicación se serializa por repositorio
+y no cancela ejecuciones en curso.
 
 ### Configuración de la GitHub App
 
@@ -327,12 +333,17 @@ just release-preflight "$SOURCE_SHA" "$LAST_TAG" /tmp/opencode/preflight.json
 ```
 
 `release-preflight` requiere refs actualizadas previamente (`origin/master` y
-tags); no las descarga. Para un preflight completo de la publicación CI se
-usa `ci-release` con provenance, assets y salida; esa receta consulta el
-remoto y puede escribir en `master`, crear tags/releases y subir assets. No la
-ejecutes como receta casual local ni con credenciales sin protección. En GitHub,
-la publicación elegible está separada tras el preflight sin App; si se necesita
-aprobación humana, protege el Environment antes de asociarlo al job Release.
+tags); no las descarga. Para validar localmente un handoff completo ya
+empaquetado usa `ci-push` con provenance, assets y salida, y
+`RELEASE_PREFLIGHT_ONLY=1`: verifica artifact/ref/bundle y consulta el remoto,
+pero no hace push. Requiere permisos de lectura del remoto y no necesita
+credenciales de escritura. Sin esa variable, solo el job CI `push` usa `ci-push`
+para publicar atómicamente `master` y el tag tras el preflight y una nueva
+validación con token App. `ci-release` es publicación-only: comprueba los refs
+ya publicados y crea/recupera el draft y sus assets; no hace bump, tag ni push
+de Git. No ejecutes la ruta de publicación local como receta casual ni con
+credenciales sin protección. En GitHub, la publicación elegible está separada
+tras el preflight sin App.
 
 La primera activación de Nix/dev-env y los binarios cruzados macOS/Windows no
 se han validado en runners nativos; la compilación cruzada Go se ejecuta en

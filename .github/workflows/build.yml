@@ -4,16 +4,26 @@ on:
   workflow_run:
     workflows: [Checks]
     types: [completed]
+    branches: [master]
 
 permissions:
   contents: read
   actions: read
 
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
 jobs:
   build:
-    if: github.event.workflow_run.conclusion == 'success'
+    # PR Checks must never start a build runner, even when their head is master.
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'master' && github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 40
+    outputs:
+      eligible: ${{ steps.package.outputs.eligible }}
+      producer_attempt: ${{ steps.producer.outputs.attempt }}
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -21,12 +31,12 @@ jobs:
           path: trusted
           persist-credentials: false
 
-      # Build NARs never share Checks' writable namespace or live store database.
+      # Restore the shared NAR cache populated by successful master Checks.
       - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         id: nix-cache
         with:
           path: ~/nix-cache
-          key: build-nix-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('trusted/devenv.nix', 'trusted/devenv.yaml', 'trusted/devenv.lock') }}
+          key: nix-env-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('trusted/devenv.nix', 'trusted/devenv.yaml', 'trusted/devenv.lock') }}
 
       - name: Prepare runner-owned Nix binary cache
         id: prepare-nix-cache
@@ -102,18 +112,107 @@ jobs:
           devenv shell -- just --justfile "$CI_JUSTFILE" --working-directory "$GITHUB_WORKSPACE/source" ci-build "$RUNNER_TEMP/provenance.json" "$RUNNER_TEMP/build-assets" "$RUNNER_TEMP/build-metadata.json"
 
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        id: upload
+        if: steps.package.outputs.eligible == 'true'
         with:
-          name: ${{ steps.package.outputs.artifact_class || steps.provenance.outputs.artifact_class }}-${{ github.run_id }}
+          name: ${{ steps.package.outputs.artifact_class }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/build-assets
           if-no-files-found: error
           retention-days: 7
 
-      - name: Export Nix binary cache
-        if: github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository && steps.provenance.outputs.event == 'push' && steps.provenance.outputs.head_repository == github.repository && steps.nix-cache.outputs.cache-matched-key == ''
-        run: nix copy --all --to "file://$HOME/nix-cache"
+      - name: Retain producing attempt for failed-job reruns
+        id: producer
+        env:
+          PRODUCER_ATTEMPT: ${{ github.run_attempt }}
+        run: echo "attempt=$PRODUCER_ATTEMPT" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        if: github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository && steps.provenance.outputs.event == 'push' && steps.provenance.outputs.head_repository == github.repository && steps.nix-cache.outputs.cache-matched-key == ''
+  push:
+    needs: build
+    if: needs.build.result == 'success' && needs.build.outputs.eligible == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      pushed: ${{ steps.push.outputs.pushed }}
+    env:
+      CI_JUSTFILE: ${{ github.workspace }}/trusted/justfile
+      RELEASE_BOT_SLUG: ${{ vars.RELEASE_BOT_SLUG }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: trusted
+          persist-credentials: false
+
+      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: ~/nix-cache
-          key: build-nix-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('trusted/devenv.nix', 'trusted/devenv.yaml', 'trusted/devenv.lock') }}
+          key: nix-env-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('trusted/devenv.nix', 'trusted/devenv.yaml', 'trusted/devenv.lock') }}
+      - name: Prepare runner-owned Nix binary cache
+        id: prepare-nix-cache
+        run: install -d -m 0755 "$HOME/nix-cache" "$HOME/nix-cache/nar" "$HOME/nix-cache/realisations" "$HOME/nix-cache/log"
+      - uses: cachix/install-nix-action@b85815f71a6de0ddee80b8a80a98d43f4bcc66c7 # v31
+        with:
+          install_url: https://releases.nixos.org/nix/nix-2.28.5/install
+          extra_nix_config: |
+            extra-substituters = file:///home/runner/nix-cache?trusted=1 https://devenv.cachix.org https://cachix.cachix.org
+            extra-trusted-public-keys = devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw= cachix.cachix.org-1:eWNHQldwUO7G2VkjpnjDbWwy4KQ/HNxht7H4SSoMckM=
+      - name: Bootstrap pinned devenv
+        run: |
+          nix build github:cachix/devenv-nixpkgs/c2f38fe7f9e04d9aadd354d380f2bd40531d9737#devenv --out-link "$RUNNER_TEMP/devenv-cli"
+          echo "$RUNNER_TEMP/devenv-cli/bin" >> "$GITHUB_PATH"
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          path: build-assets
+          run-id: ${{ github.run_id }}
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+      - name: Validate successful exact producer and caller
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRODUCER_ATTEMPT: ${{ needs.build.outputs.producer_attempt }}
+          ARTIFACT_ID: ${{ needs.build.outputs.artifact_id }}
+        run: |
+          cd trusted
+          # shellcheck disable=SC2016
+          devenv shell -- bash -euo pipefail -c '
+            just --justfile justfile workflow-handoff "$GITHUB_WORKSPACE/build-assets" "$PRODUCER_ATTEMPT" "$ARTIFACT_ID" "$RUNNER_TEMP/handoff-input.json"
+            just --justfile justfile workflow-provenance release "$RUNNER_TEMP/handoff-input.json" "$RUNNER_TEMP/provenance.json"
+          '
+      - name: Validate inert handoff and current remote refs
+        id: preflight
+        env:
+          RELEASE_PREFLIGHT_ONLY: '1'
+          RELEASE_READ_TOKEN: ${{ github.token }}
+        run: |
+          cd trusted
+          devenv shell -- just --justfile "$CI_JUSTFILE" ci-push "$RUNNER_TEMP/provenance.json" "$GITHUB_WORKSPACE/build-assets" "$RUNNER_TEMP/preflight.json"
+      - uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0
+        if: steps.preflight.outputs.ready == 'true'
+        id: app-token
+        with:
+          app-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+      - name: Revalidate and atomically push only verified Git objects
+        id: push
+        if: steps.preflight.outputs.ready == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_READ_TOKEN: ${{ github.token }}
+          RELEASE_BOT_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          cd trusted
+          devenv shell -- just --justfile "$CI_JUSTFILE" ci-push "$RUNNER_TEMP/provenance.json" "$GITHUB_WORKSPACE/build-assets" "$RUNNER_TEMP/push.json"
+
+  release:
+    needs: [build, push]
+    if: needs.build.result == 'success' && needs.build.outputs.eligible == 'true' && needs.push.result == 'success' && needs.push.outputs.pushed == 'true'
+    uses: ./.github/workflows/release.yml
+    with:
+      producer_attempt: ${{ needs.build.outputs.producer_attempt }}
+      artifact_id: ${{ needs.build.outputs.artifact_id }}
+    secrets:
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
