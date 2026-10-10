@@ -1,22 +1,24 @@
 name: Release
 
 on:
-  workflow_run:
-    workflows: [Build]
-    types: [completed]
+  workflow_call:
+    inputs:
+      producer_attempt:
+        required: true
+        type: string
+      artifact_id:
+        required: true
+        type: string
+    secrets:
+      RELEASE_APP_PRIVATE_KEY:
+        required: true
 
 permissions:
   contents: read
   actions: read
 
-concurrency:
-  group: release-${{ github.repository }}
-  cancel-in-progress: false
-
 jobs:
   release:
-    # Build is itself triggered by workflow_run; original push is checked by API.
-    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'workflow_run' && github.event.workflow_run.head_branch == 'master' && github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     env:
@@ -28,11 +30,12 @@ jobs:
           path: trusted
           persist-credentials: false
 
+      # Release consumes the shared NAR cache; it never exports or saves it.
       - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         id: nix-cache
         with:
           path: ~/nix-cache
-          key: release-nix-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('trusted/devenv.nix', 'trusted/devenv.yaml', 'trusted/devenv.lock') }}
+          key: nix-env-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('trusted/devenv.nix', 'trusted/devenv.yaml', 'trusted/devenv.lock') }}
 
       - name: Prepare runner-owned Nix binary cache
         id: prepare-nix-cache
@@ -54,10 +57,9 @@ jobs:
 
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          pattern: '*-${{ github.event.workflow_run.id }}'
-          merge-multiple: true
+          artifact-ids: ${{ inputs.artifact_id }}
           path: build-assets
-          run-id: ${{ github.event.workflow_run.id }}
+          run-id: ${{ github.run_id }}
           repository: ${{ github.repository }}
           github-token: ${{ github.token }}
 
@@ -65,26 +67,16 @@ jobs:
         id: provenance
         env:
           GH_TOKEN: ${{ github.token }}
-          BUILD_RUN_ID: ${{ github.event.workflow_run.id }}
+          BUILD_RUN_ID: ${{ github.run_id }}
+          PRODUCER_ATTEMPT: ${{ inputs.producer_attempt }}
+          ARTIFACT_ID: ${{ inputs.artifact_id }}
         run: |
           cd trusted
           # shellcheck disable=SC2016
           devenv shell -- bash -euo pipefail -c '
             cd "$GITHUB_WORKSPACE"
             gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID" > "$RUNNER_TEMP/build-api.json"
-            python3 - <<"PY"
-          import json, os, subprocess
-          from pathlib import Path
-          temporary = Path(os.environ["RUNNER_TEMP"])
-          metadata = json.loads(Path("build-assets/build-metadata.json").read_text())
-          checks_id = metadata["checks_run_id"]
-          if type(checks_id) is not int or checks_id <= 0:
-              raise ValueError("invalid Checks ID")
-          repository = os.environ["GITHUB_REPOSITORY"]
-          checks = json.loads(subprocess.check_output(["gh", "api", f"repos/{repository}/actions/runs/{checks_id}"]))
-          snapshot = dict(repository=os.environ["GITHUB_REPOSITORY"], trigger_run_id=int(os.environ["BUILD_RUN_ID"]), checks=checks, build=json.loads((temporary / "build-api.json").read_text()), metadata=metadata, require_chain_binding=True, allow_development_skip=True)
-          (temporary / "provenance-input.json").write_text(json.dumps(snapshot))
-          PY
+            just --justfile trusted/justfile workflow-handoff "$GITHUB_WORKSPACE/build-assets" "$PRODUCER_ATTEMPT" "$ARTIFACT_ID" "$RUNNER_TEMP/provenance-input.json"
             just --justfile trusted/justfile workflow-provenance release "$RUNNER_TEMP/provenance-input.json" "$RUNNER_TEMP/provenance.json"
             python3 - <<"PY"
           import json, os
@@ -167,13 +159,3 @@ jobs:
           subprocess.run(["just", "--justfile", "trusted/justfile", "--working-directory", str(Path(os.environ["RUNNER_TEMP"]) / "release-input"), "ci-release", str(Path(os.environ["RUNNER_TEMP"]) / "provenance.json"), str(Path.cwd() / "build-assets"), str(Path(os.environ["RUNNER_TEMP"]) / "publication.json")], env=env, check=True)
           PY
           '
-
-      - name: Export Nix binary cache
-        if: steps.provenance.outputs.event == 'push' && steps.provenance.outputs.head_repository == github.repository && steps.nix-cache.outputs.cache-matched-key == ''
-        run: nix copy --all --to "file://$HOME/nix-cache"
-
-      - uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        if: steps.provenance.outputs.event == 'push' && steps.provenance.outputs.head_repository == github.repository && steps.nix-cache.outputs.cache-matched-key == ''
-        with:
-          path: ~/nix-cache
-          key: release-nix-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('trusted/devenv.nix', 'trusted/devenv.yaml', 'trusted/devenv.lock') }}

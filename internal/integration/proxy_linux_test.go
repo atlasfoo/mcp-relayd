@@ -19,8 +19,13 @@ import (
 // descendants. The manager must reap its direct child; orphan reaping belongs
 // to PID 1 and may be delayed in a container.
 func runningPID(pid int) (bool, error) {
-	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
-	if errors.Is(err, os.ErrNotExist) {
+	return runningPIDWithReader(pid, os.ReadFile)
+}
+
+func runningPIDWithReader(pid int, readFile func(string) ([]byte, error)) (bool, error) {
+	data, err := readFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	// A process can disappear after procfs opens stat but before it is read.
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
 		return false, nil
 	}
 	if err != nil {
@@ -31,6 +36,42 @@ func runningPID(pid int) (bool, error) {
 		return false, fmt.Errorf("malformed process stat for %d", pid)
 	}
 	return rest[0] != 'Z' && rest[0] != 'X', nil
+}
+
+func TestRunningPID(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		stat    string
+		readErr error
+		running bool
+		wantErr error
+	}{
+		{name: "missing", readErr: &os.PathError{Op: "open", Path: "/proc/123/stat", Err: syscall.ENOENT}},
+		{name: "exited-during-read", readErr: &os.PathError{Op: "read", Path: "/proc/123/stat", Err: syscall.ESRCH}},
+		{name: "permission-denied", readErr: &os.PathError{Op: "open", Path: "/proc/123/stat", Err: syscall.EACCES}, wantErr: syscall.EACCES},
+		{name: "io-error", readErr: &os.PathError{Op: "read", Path: "/proc/123/stat", Err: syscall.EIO}, wantErr: syscall.EIO},
+		{name: "running", stat: "123 (fixture) R 1", running: true},
+		{name: "sleeping", stat: "123 (fixture) S 1", running: true},
+		{name: "stopped", stat: "123 (fixture) T 1", running: true},
+		{name: "zombie", stat: "123 (fixture) Z 1"},
+		{name: "dead", stat: "123 (fixture) X 1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			readFile := func(path string) ([]byte, error) {
+				if path != "/proc/123/stat" {
+					t.Fatalf("unexpected proc path: %q", path)
+				}
+				return []byte(tc.stat), tc.readErr
+			}
+			running, err := runningPIDWithReader(123, readFile)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("running PID error = %v, want %v", err, tc.wantErr)
+			}
+			if running != tc.running {
+				t.Errorf("running PID = %v, want %v", running, tc.running)
+			}
+		})
+	}
 }
 
 func TestRealProxyBoundedTreeCleanup(t *testing.T) {

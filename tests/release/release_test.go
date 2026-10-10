@@ -28,6 +28,69 @@ type candidate struct {
 	Reason   string `json:"reason"`
 }
 
+const canonicalBumpTemplate = "chore(release): bump version $current_version → $new_version [skip ci]"
+
+func TestGeneratedBumpHasCanonicalSkipCIMessage(t *testing.T) {
+	f := newFixture(t)
+	f.git(t, "tag", "v0.1.0")
+	f.git(t, "commit", "--allow-empty", "-m", "feat: add relay")
+	source := f.git(t, "rev-parse", "HEAD")
+	f.env = append(f.env, "GIT_AUTHOR_NAME="+publicationBotName, "GIT_AUTHOR_EMAIL="+publicationBotEmail, "GIT_COMMITTER_NAME="+publicationBotName, "GIT_COMMITTER_EMAIL="+publicationBotEmail)
+	if output, err := f.command(t, "cz", "--config", ".cz.toml", "bump", "--yes"); err != nil {
+		t.Fatalf("generate standard bump: %v: %s", err, output)
+	}
+	if message := f.git(t, "show", "-s", "--format=%B", "HEAD"); message != "chore(release): bump version 0.1.0 → 0.2.0 [skip ci]" {
+		t.Errorf("generated bump message = %q, want canonical [skip ci] suffix", message)
+	}
+	if f.git(t, "show", "-s", "--format=%P", "HEAD") != source || f.git(t, "rev-parse", "v0.2.0^{commit}") != f.git(t, "rev-parse", "HEAD") {
+		t.Fatal("generated bump must have the tested source as its only parent and its version tag")
+	}
+	if diff := f.git(t, "diff", "--name-only", source, "HEAD"); diff != ".cz.toml\nCHANGELOG.md" {
+		t.Errorf("generated bump diff = %q", diff)
+	}
+}
+
+func TestReleaseCandidateCanonicalSkipCIConfiguration(t *testing.T) {
+	for _, template := range []string{canonicalBumpTemplate, "chore(release): bump version $current_version → $new_version", "chore(release): arbitrary $new_version [skip ci]"} {
+		t.Run(template, func(t *testing.T) {
+			f := newFixture(t)
+			setBumpTemplate(t, f, template)
+			f.git(t, "add", ".cz.toml")
+			f.git(t, "commit", "--allow-empty", "-m", "chore: configure release message")
+			f.git(t, "tag", "v0.1.0")
+			f.git(t, "commit", "--allow-empty", "-m", "feat: add relay")
+			output, err := f.invoke(t, "release-candidate")
+			if template != canonicalBumpTemplate {
+				if err == nil {
+					t.Errorf("noncanonical Commitizen template accepted: %s", output)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("canonical Skip CI configuration rejected: %v: %s", err, output)
+			}
+			var got candidate
+			decode(t, output, &got)
+			if !got.Eligible || got.Version != "0.2.0" {
+				t.Errorf("canonical configuration candidate = %+v", got)
+			}
+		})
+	}
+}
+
+func setBumpTemplate(t *testing.T, f fixture, template string) {
+	t.Helper()
+	path := filepath.Join(f.dir, ".cz.toml")
+	var lines []string
+	for line := range strings.SplitSeq(read(t, path), "\n") {
+		if strings.HasPrefix(line, "bump_message = ") {
+			line = fmt.Sprintf("bump_message = %q", template)
+		}
+		lines = append(lines, line)
+	}
+	write(t, path, strings.Join(lines, "\n"), 0o600)
+}
+
 func TestReleaseCandidateHistory(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -218,6 +281,22 @@ func newFixture(t *testing.T) fixture {
 		data, err := os.ReadFile(filepath.Join("../..", name)) // #nosec G304 -- Names are fixed repository tooling files, not user input.
 		if err != nil {
 			t.Fatalf("release contract requires root %s: %v", name, err)
+		}
+		if name == ".cz.toml" {
+			const versionKey = "version = \""
+			lines := strings.Split(string(data), "\n")
+			foundVersion := false
+			for i, line := range lines {
+				if strings.HasPrefix(line, versionKey) {
+					lines[i] = versionKey + "0.1.0\""
+					foundVersion = true
+					break
+				}
+			}
+			if !foundVersion {
+				t.Fatalf("release contract requires root %s to declare project version", name)
+			}
+			data = []byte(strings.Join(lines, "\n"))
 		}
 		write(t, filepath.Join(f.dir, name), string(data), 0o600)
 	}
