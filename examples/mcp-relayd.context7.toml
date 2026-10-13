@@ -1,0 +1,24 @@
+# Copy to ~/.config/mcp-relayd.toml to test Context7 through the relay.
+# Requires pnpx, Node.js and mcp-proxy 0.12.0 on the daemon's PATH.
+# Inspector endpoint (Streamable HTTP): http://127.0.0.1:9876/mcp/context7
+# Context7 downloads and documentation queries require internet access.
+
+[gateway]
+host = "127.0.0.1"
+port = 9876
+shutdown_timeout = "10s"
+
+[proxy]
+command = "mcp-proxy"
+# Allow time for pnpx to download the package on its first invocation.
+startup_timeout = "120s"
+
+[servers.context7]
+command = "pnpx"
+args = ["-y", "@upstash/context7-mcp"]
+cwd = ""
+autostart = true
+
+[servers.context7.env]
+# Only PATH is inherited automatically on Unix; pnpx also needs HOME.
+HOME = "${HOME}"

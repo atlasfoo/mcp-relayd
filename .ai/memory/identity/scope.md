@@ -3,7 +3,7 @@ type: scope
 title: "Scope"
 description: "Owns stdio-MCP relay and Streamable HTTP exposure; it does not implement the relayed MCP servers."
 tags: [identity, scope, mcp, http]
-updated: "2026-10-03"
+updated: "2026-10-07"
 ---
 
 # Scope
@@ -23,4 +23,6 @@ Single unit.
 
 ## Relations
 
-No concrete external surface is implemented or recorded yet.
+- [MCP transport](../references/mcp.md) defines the public protocol boundary.
+- [mcp-proxy](../references/mcp-proxy.md) supplies the temporary external bridge.
+- [GitHub Actions](../references/github-actions.md), [GitHub App](../references/github-app.md) and [Releases](../references/github-releases.md) provide checks and distribution, not a hosted relay service.

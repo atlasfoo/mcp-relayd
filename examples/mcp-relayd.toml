@@ -1,0 +1,21 @@
+# Example configuration for mcp-relayd.
+# Environment values are expanded from the daemon's process environment.
+
+[gateway]
+host = "127.0.0.1"
+port = 9876
+shutdown_timeout = "10s"
+
+[proxy]
+command = "mcp-proxy"
+startup_timeout = "30s"
+
+[servers.example]
+command = "node"
+args = ["server.js", "--transport", "stdio"]
+# Empty cwd uses the daemon's current working directory.
+cwd = ""
+autostart = true
+
+[servers.example.env]
+NODE_ENV = "production"

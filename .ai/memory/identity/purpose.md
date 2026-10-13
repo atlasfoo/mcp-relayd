@@ -3,7 +3,7 @@ type: purpose
 title: "Purpose"
 description: "Simplifies local MCP administration and reduces duplicated process and initialization overhead for agent integrations."
 tags: [identity, purpose, mcp, agents]
-updated: "2026-10-03"
+updated: "2026-10-12"
 ---
 
 # Purpose
@@ -13,4 +13,4 @@ updated: "2026-10-03"
 
 ## Relations
 
-No concrete external surface is implemented or recorded yet.
+- [MCP Streamable HTTP](../references/mcp.md) defines the client-facing transport boundary; [mcp-proxy](../references/mcp-proxy.md) supplies the temporary external bridge.

@@ -1,9 +1,9 @@
 ---
 type: convention
 title: "Conventions"
-description: "Uses TDD and project-local Go tooling as the source of style and planning conventions."
+description: "Uses TDD, golangci-lint formatting and Nix-managed commit and quality tooling."
 tags: [identity, convention, planning, style, go]
-updated: "2026-10-03"
+updated: "2026-10-04"
 ---
 
 # Conventions
@@ -18,4 +18,15 @@ updated: "2026-10-03"
 
 ## Style and syntax
 
-Project-local Go tooling and its configuration define formatting and static-analysis rules. Until dedicated style configuration is added, use `gofmt` and the checks in `devenv.nix`.
+`.golangci.yml` is the formatting and static-analysis authority:
+gofumpt and goimports format Go code through `fmt`, while `lint` checks
+without changing files. [golangci-lint](../references/golangci-lint.md)
+documents the integration.
+
+[Lefthook](../references/lefthook.md) enforces formatting and spelling at
+pre-commit, [Commitizen](../references/commitizen.md) validates Conventional
+Commits at commit-msg, and pre-push runs `check`.
+Commitizen owns SemVer and changelog generation through `.cz.toml`.
+All quality tools, including Commitizen, are supplied by
+[devenv](../references/devenv.md); no manual uv installation is required.
+[typos](../references/typos.md) checks English code and filenames.

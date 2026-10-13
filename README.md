@@ -1,158 +1,185 @@
 # mcp-relayd
 
-Proyecto Go inicial con un entorno de desarrollo opcional gestionado por
-[devenv](https://devenv.sh/getting-started/) y Nix.
+Run your local stdio-based [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) servers behind one HTTP address, then connect your MCP clients by URL instead of having each client launch its own server.
 
-## Empezar con Nix
+`mcp-relayd` starts one external `mcp-proxy` bridge per configured server and exposes it at `/mcp/<server-name>`. It listens only on loopback: clients must run on the same machine. It is not a LAN or remote-access gateway.
 
-Nix y devenv deben estar instalados. Si devenv no aparece en el PATH:
+## Why mcp-relayd?
 
-```sh
-export PATH="$HOME/.nix-profile/bin:$PATH"
-```
+Using several agents or client sessions often means duplicating MCP server commands, environment variables, and runtime settings across client configurations. Each client may also launch its own copy of the same stdio server, repeating startup work and consuming extra resources.
 
-Desde esta carpeta:
+`mcp-relayd` centralizes those settings in one per-user TOML file. Configure your servers once, then point each agent at the same HTTP URLs. While the daemon is running, multiple agents and new sessions reuse the running servers instead of managing separate processes. Server configuration stays in one place; each client only needs the endpoint URL.
 
-```sh
-devenv shell
-run
-```
+## Requirements
 
-El programa imprime `Hello from mcp-relayd!`. La primera activación descarga
-Go, gopls, Git, golangci-lint, Lefthook, typos y Commitizen mediante Nix. `devenv.lock`
-fija las revisiones. Guarda ese archivo en el repositorio para que otros
-desarrolladores usen las mismas revisiones.
+- **`mcp-relayd`**: download the executable for your platform below. Go, Nix, and devenv are not required to use a release binary.
+- **[uv](https://docs.astral.sh/uv/getting-started/installation/)** (recommended): installs `mcp-proxy` in an isolated tool environment.
+- **`mcp-proxy`**: the required external stdio-to-HTTP bridge; it is not bundled with the daemon.
+- **Your MCP servers**: install each server and its runtime (for example, Node.js or Python). Server commands must support stdio transport and be available on `PATH`, or use absolute executable paths.
+- **An MCP client with Streamable HTTP support** to connect to the exposed servers.
 
-Dentro del entorno:
+## Quick start
 
-```sh
-fmt         # corrige formato e imports de Go
-lint        # comprueba formato y análisis estático sin modificar archivos
-spellcheck  # comprueba ortografía inglesa y nombres de archivos
-check       # lint, ortografía y go test
-build       # genera bin/mcp-relayd
-```
+### 1. Install mcp-relayd
 
-También puedes ejecutar la comprobación del entorno desde fuera del shell:
+Download the archive for your OS and CPU architecture, plus `SHA256SUMS`, from [GitHub Releases](https://github.com/atlasfoo/mcp-relayd/releases). Put both files in the same directory and verify the archive before extracting it:
 
 ```sh
-devenv test
+sha256sum -c --ignore-missing SHA256SUMS
 ```
 
-La tarea `mcp-relayd:quality` ejecuta `check` y comprueba la salida del
-programa antes de `devenv:enterTest`; así las verificaciones también se
-ejecutan con devenv 2.4.
-
-## Hooks y commits
-
-Commitizen (`cz`) ya está disponible dentro de `devenv shell`. Activa los
-hooks una vez por clon:
+On macOS, use `shasum` instead (replace the placeholder with your archive's filename):
 
 ```sh
-lefthook install
+grep -F '  mcp-relayd_<version>_<os>_<arch>.<ext>' SHA256SUMS | shasum -a 256 -c -
 ```
 
-Ejecuta los commits y pushes dentro de `devenv shell`
-para que los hooks encuentren las herramientas y el comando `check`.
+On Windows, use PowerShell's `Get-FileHash <archive> -Algorithm SHA256` and compare the result with the matching entry in `SHA256SUMS`.
 
-1. `pre-commit` aplica `gofumpt` y `goimports` a los archivos Go preparados
-   para el commit y vuelve a añadir esos archivos al índice. Después comprueba
-   la ortografía de los archivos preparados.
-2. `commit-msg` rechaza mensajes que no sigan Conventional Commits.
-3. `pre-push` ejecuta `check` sobre todo el proyecto sin modificar archivos.
+Extract `mcp-relayd` (`mcp-relayd.exe` on Windows) and place it on your `PATH`, or invoke it by its full path.
 
-El hook de formato vuelve a añadir el archivo Go completo: si preparaste
-solo algunos fragmentos, revisa el índice antes de confirmar el commit.
+### 2. Install the mcp-proxy bridge
 
-Puedes preparar un mensaje interactivamente o usar Git directamente:
+With uv installed, run:
 
 ```sh
-cz commit
-# Alternativa:
-git commit -m "feat(relay): expose local MCP servers"
+uv tool install mcp-proxy
 ```
 
-`.golangci.yml` es la autoridad de formato y análisis estático. Usa la base
-estándar de golangci-lint v2 con comprobaciones de errores, seguridad, recursos
-HTTP, contextos e idioms modernos; [la configuración oficial](https://golangci-lint.run/docs/configuration/file/)
-explica las secciones de linters y formateadores.
+Ensure `mcp-proxy` is on your `PATH`; if needed, run `uv tool update-shell` and restart your shell. Alternatively, set `proxy.command` in your TOML file to its absolute executable path. No repository checkout or Go build is needed.
 
-`.typos.toml` revisa inglés y contiene el vocabulario del proyecto. Excluye
-el README en español, archivos generados conocidos, dependencias, archivos de
-credenciales y directorios de entorno o salida. `--force-exclude` conserva
-estas exclusiones incluso cuando el hook recibe rutas explícitas.
+**Compatibility:** the tested versions are **mcp-proxy 0.12.0** and **MCP SDK 1.30.0**. The command above does not pin versions, so compatibility with the installed versions is not guaranteed. The project's [provisioning script](scripts/provision-mcp-proxy.py) uses the [hash-locked dependencies](tooling/mcp-proxy/requirements.lock) for reproducible development and CI.
 
-## Versiones y releases locales
+### 3. Create your configuration
 
-`.cz.toml` almacena la versión inicial `0.1.0`, usa SemVer 2 y etiquetas
-`v<version>`. Antes de preparar una release, deja el árbol de trabajo limpio:
+Create the parent directory if needed, then save your configuration at:
+
+| Platform | Default configuration file |
+| --- | --- |
+| Linux/macOS | `~/.config/mcp-relayd.toml` |
+| Windows | `%USERPROFILE%\.config\mcp-relayd.toml` |
+
+Start with this example or copy [`examples/mcp-relayd.toml`](examples/mcp-relayd.toml). Replace the command, arguments, and working directory with those of your installed stdio MCP server; `server.js` below is a placeholder, not a bundled server.
+
+```toml
+[gateway]
+host = "127.0.0.1"
+port = 9876
+
+[proxy]
+command = "mcp-proxy" # Or the absolute path from step 2.
+
+[servers.filesystem]
+command = "node"
+args = ["server.js", "--transport", "stdio"]
+cwd = "/path/to/filesystem-server"
+
+[servers.filesystem.env]
+NODE_ENV = "production"
+```
+
+Add another `[servers.<name>]` table for each additional server. The table name becomes its URL: `filesystem` is available at `/mcp/filesystem`. See the [configuration reference](#configuration-reference) for all fields and defaults.
+
+### 4. Start and connect
 
 ```sh
-cz version --project
-cz bump --dry-run
-# Después de revisar el resultado:
-cz bump
+mcp-relayd run
+# Or:
+mcp-relayd run --config ./mcp-relayd.toml
 ```
 
-`cz bump` modifica la versión, genera `CHANGELOG.md`, crea un commit de
-release y una etiqueta local; no publica ni hace push. Si aún no existe una
-etiqueta de versión, Commitizen pide confirmar que es la primera release.
-`feat` incrementa la versión menor y `fix` la corrección. Con
-`major_version_zero = true`, los cambios incompatibles incrementan la versión
-menor durante `0.x`; retira esa opción al preparar `1.0.0`. Véase
-[la documentación de bump](https://commitizen-tools.github.io/commitizen/commands/bump/).
+The daemon does not generate a configuration file or fall back to another location if it is missing or invalid. A relative `--config` path is resolved from the directory where you run the command.
 
-## Estructura
+In your MCP client's settings, add a remote/HTTP server using:
 
-```text
-cmd/mcp-relayd/main.go  # punto de entrada
-go.mod                 # módulo Go
-devenv.nix             # herramientas y comandos
-devenv.yaml            # origen de los paquetes Nix
-.golangci.yml          # formato y análisis estático de Go
-.typos.toml            # ortografía y vocabulario
-.cz.toml               # commits y versión SemVer
-lefthook.yml           # hooks locales de Git
+| Client setting | Value for the example above |
+| --- | --- |
+| Transport | Streamable HTTP |
+| URL | `http://127.0.0.1:9876/mcp/filesystem` |
+
+Use the host and port from `[gateway]` if you changed them. The client's `Host` header must match that authority; an `Origin` header, if supplied, must match the same `http://` origin. Browser-based clients with a different origin are rejected.
+
+Keep the daemon running while using your clients. Stop it with **Ctrl-C** (or SIGTERM) for graceful shutdown: it drains HTTP requests and stops server process trees within `gateway.shutdown_timeout`, then forces termination if necessary.
+
+## Configuration reference
+
+The TOML file has three sections: `[gateway]` for the HTTP listener, `[proxy]` for the bridge, and `[servers.<name>]` for each stdio server. Unknown fields are rejected. Omitted values use the defaults below; durations use Go syntax such as `10s` or `1m` and must be positive.
+
+| TOML field | Type | Default | Validation / behavior |
+| --- | --- | --- | --- |
+| `[gateway].host` | string | `"127.0.0.1"` | Loopback IP address, or `localhost` resolving exclusively to loopback addresses. |
+| `[gateway].port` | integer | `9876` | Integer from 1 through 65535. |
+| `[gateway].shutdown_timeout` | duration string | `"10s"` | Positive Go duration; global graceful-shutdown budget. |
+| `[proxy].command` | string | `"mcp-proxy"` | Must not be blank; executable used to start the external bridge. |
+| `[proxy].startup_timeout` | duration string | `"30s"` | Positive Go duration for bridge startup. |
+| `[servers.<name>].command` | string | required | Must not be blank; server executable. |
+| `[servers.<name>].args` | array of strings | `[]` | Arguments passed directly to the executable, without shell parsing. |
+| `[servers.<name>].cwd` | string | `""` | Empty means daemon's current directory; relative paths are config-file-relative; non-empty path must be an existing directory. |
+| `[servers.<name>].env` | table of string values | `{}` | Extra environment variables for the server; supports `${NAME}` expansion as described below. |
+| `[servers.<name>].autostart` | boolean | `true` | `false` leaves the server stopped until configuration is changed and daemon restarted. |
+
+Server names (the `<name>` in `[servers.<name>]`) must begin with an ASCII letter or digit and contain only ASCII letters, digits, `_`, or `-`; the name is also used in `/mcp/<name>`.
+
+Commands and arguments are executed **without a shell**: shell operators, `~`, and variable references in `command`, `args`, or `cwd` are not expanded. Use full executable paths when a command is not on `PATH`. On Windows, TOML literal strings such as `cwd = 'C:\servers\filesystem'` avoid escaping backslashes.
+
+Servers do **not** inherit your full environment. Their baseline contains only the daemon's `PATH` (plus `SystemRoot` and `WINDIR` on Windows); add other required variables explicitly under `[servers.<name>.env]`. For example:
+
+```toml
+[servers.filesystem.env]
+NODE_ENV = "production"
+API_TOKEN = "${FILESYSTEM_API_TOKEN}"
 ```
 
-Cuando exista lógica propia, colócala en `internal/` y mantén el punto de
-entrada pequeño. El nombre local del módulo es `mcp-relayd`; cuando publiques
-el código, puedes sustituirlo por la ruta del repositorio.
+Set `FILESYSTEM_API_TOKEN` in the environment **before starting the daemon**. Each referenced variable must exist and be non-empty, or configuration loading fails. Expansion applies only to `env` values; this lets you keep secrets out of the TOML file.
 
-## Dependencias y actualizaciones
+## Status and troubleshooting
 
-La versión efectiva de Go proviene de los paquetes fijados en `devenv.lock`.
-`go 1.25.0` en `go.mod` declara la versión mínima del lenguaje. El entorno
-usa `GOTOOLCHAIN=local` para que Go no descargue otra herramienta por su cuenta.
-
-Añade dependencias de sistema a `packages` en `devenv.nix`, por ejemplo
-`pkgs.pkg-config` si una futura biblioteca nativa lo necesita. No hace falta
-instalarlas globalmente.
-
-Para actualizar las revisiones de Nix de forma intencional:
+Check the daemon and its servers with:
 
 ```sh
-devenv update
-devenv test
+curl http://127.0.0.1:9876/health
+mcp-relayd --help
+mcp-relayd --version
 ```
 
-## Usar Go sin Nix
+`/health` returns JSON with overall status and each server's name, state (`STARTING`, `READY`, `STOPPED`, `STOPPING`, or `FAILED`), and proxy PID when available. `--help` and `--version` work without a configuration file; the latter prints the build version and source SHA. Startup and bridge errors are written as structured JSON logs to stderr.
 
-Si prefieres tu propia instalación de Go (1.25 o posterior), instala también
-golangci-lint 2.13 o posterior, Lefthook, typos y Commitizen. Las versiones probadas
-son golangci-lint 2.13.2, Lefthook 2.1.12, typos 1.50.1 y Commitizen 4.16.5; Nix las suministra
-desde las revisiones de `devenv.lock`.
+| Problem | What to check |
+| --- | --- |
+| Missing or invalid configuration | Check the selected file, TOML field names, `cwd` directories, and referenced environment variables. |
+| Bridge or server does not start | Check `proxy.command`, server executables, runtimes, arguments, and stderr logs. |
+| Connection refused | Ensure the daemon is running and your client uses the configured host and port. |
+| HTTP 404 | The server name in `/mcp/<name>` must match a configured table name. |
+| HTTP 503 | Check `/health` and logs: the server may be starting, stopped, or failed. `READY` is a snapshot, not a guarantee that the upstream is still alive. |
 
-Ejecuta las mismas verificaciones directamente:
+## Behavior and limitations
+
+- **Restart after editing the configuration.** It is read only at startup; there is no hot reload.
+- **Servers start by default.** With `autostart = false`, a server stays stopped; client requests do not start it. Set it back to `true` and restart the daemon to enable it.
+- **Clients share state.** Each server has one shared upstream bridge and MCP session, not a separate instance or independent session for each client.
+- **MCP feature support depends on the bridge.** Server-to-client requests such as sampling, elicitation, and roots are not guaranteed to work.
+- **Local use only.** Automatic server restart, OS service installation, LAN exposure, and a native bridge are not provided.
+
+## Development
+
+For contributors, install [Nix](https://nixos.org/download/) and [devenv](https://devenv.sh/getting-started/), clone the repository, and run `devenv shell` from its root. The shell supplies Go, Python 3.13, uv, and the pinned project tools, and provisions the locked bridge (initially requiring PyPI access).
+
+Inside the shell:
 
 ```sh
-go run ./cmd/mcp-relayd
-golangci-lint fmt --diff ./...
-golangci-lint run ./...
-typos --force-exclude .
-go test ./...
+run run       # Run the daemon; add --config PATH if needed.
+build         # Build bin/mcp-relayd.
+check         # Formatting, lint, spelling, and Go tests; no file changes.
+go vet ./...
+devenv test   # Full checks plus a smoke test using the real bridge.
+```
+
+For a Go-only build without Nix, install **Go 1.25 or later**:
+
+```sh
 go build -o bin/mcp-relayd ./cmd/mcp-relayd
 ```
 
-Los hooks usan los comandos del entorno devenv; usa `devenv shell` cuando
-vayas a instalar o ejecutar los hooks.
+On Windows, use `-o bin/mcp-relayd.exe`. A Go-only build does not need Python or install the bridge; the bridge is still required to run the daemon. Optional Git hooks: `lefthook install` (Conventional Commits via Commitizen).
+
+See [the CI workflow guide](docs/actions-flow.md) for Checks → Build → Release, provenance checks, and release prerequisites. Release archives contain only the daemon; the bridge remains external.

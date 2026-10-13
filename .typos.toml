@@ -21,6 +21,8 @@ extend-exclude = [
   "*.gen.go",
   "*.pb.go",
   "README.md",
+  # Spanish documentation, like README.md, is outside the English dictionary.
+  "docs/actions-flow.md",
   ".env*",
   "*.pem",
   "*.key",
@@ -37,3 +39,5 @@ ACP = "ACP"
 stdio = "stdio"
 Streamable = "Streamable"
 relayd = "relayd"
+# Nix's binary-cache directory name.
+realisations = "realisations"
