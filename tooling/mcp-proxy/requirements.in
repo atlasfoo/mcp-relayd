@@ -1,0 +1,4 @@
+# Keep the bridge separate from the Go distribution. MCP 2.x is incompatible
+# with mcp-proxy 0.12.0 (request_ctx was removed).
+mcp-proxy==0.12.0
+mcp==1.30.0
