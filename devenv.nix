@@ -43,6 +43,7 @@
       golangci-lint run ./...
     '';
     spellcheck.exec = "typos --force-exclude .";
+    # App-only: the nested release module is checked by just check-pipeline.
     check.exec = ''
       set -eu
       lint

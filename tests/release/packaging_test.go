@@ -28,23 +28,23 @@ var releaseTargets = []struct {
 }
 
 func TestReleasePackagingSixTargetsAndChecksums(t *testing.T) {
+	f := newFixture(t)
+	out := t.TempDir()
+	mockGo := installMockGo(t, &f, "linux", "amd64")
+	invokePackaging(t, f, "release-package", "1.2.3", "source-abc", "run-42", out)
+	calls := read(t, filepath.Join(filepath.Dir(mockGo), "calls"))
+	lines := strings.Split(strings.TrimSpace(calls), "\n")
+	if len(lines) != len(releaseTargets) {
+		t.Fatalf("build calls = %d, want %d", len(lines), len(releaseTargets))
+	}
+	for _, line := range lines {
+		if !strings.Contains(line, "-X main.version=1.2.3") || !strings.Contains(line, "-X main.sourceSHA=source-abc") || !strings.Contains(line, "CGO_ENABLED=0 build -trimpath") {
+			t.Errorf("build lacks version/source/cgo/trimpath flags: %s", line)
+		}
+	}
 	for _, tc := range releaseTargets {
 		t.Run(tc.goos+"-"+tc.goarch, func(t *testing.T) {
-			f := newFixture(t)
-			out := filepath.Join(t.TempDir(), "assets")
-			mockGo := installMockGo(t, &f, tc.goos, tc.goarch)
-			if _, err := f.command(t, "mkdir", "-p", out); err != nil {
-				t.Fatal(err)
-			}
-			invokePackaging(t, f, "release-package", "1.2.3", "source-abc", "run-42", out)
-			calls := read(t, filepath.Join(filepath.Dir(mockGo), "calls"))
-			if !strings.Contains(calls, "-X main.version=1.2.3") || !strings.Contains(calls, "-X main.sourceSHA=source-abc") {
-				t.Errorf("build did not embed candidate version and source SHA: %s", calls)
-			}
-			if !strings.Contains(calls, "CGO_ENABLED=0") {
-				t.Errorf("build did not disable cgo: %s", calls)
-			}
-			if len(strings.Split(strings.TrimSpace(calls), "\n")) != len(releaseTargets) || !strings.Contains(calls, tc.goos+" "+tc.goarch+" CGO_ENABLED=0 build -trimpath") {
+			if !strings.Contains(calls, tc.goos+" "+tc.goarch+" CGO_ENABLED=0 build -trimpath") {
 				t.Errorf("missing cross-build target or trimpath: %s", calls)
 			}
 			name := fmt.Sprintf("mcp-relayd_1.2.3_%s_%s.%s", tc.goos, tc.goarch, tc.suffix)
@@ -210,6 +210,7 @@ func installMockGo(t *testing.T, f *fixture, goos, goarch string) string {
 	dir := t.TempDir()
 	executable := filepath.Join(dir, "go")
 	script := fmt.Sprintf("#!/bin/sh\nset -eu\nprintf '%%s %%s CGO_ENABLED=%%s %%s\\n' \"$GOOS\" \"$GOARCH\" \"$CGO_ENABLED\" \"$*\" >> %q\nout=\nwhile [ $# -gt 0 ]; do if [ \"$1\" = -o ]; then shift; out=$1; fi; shift; done\nmkdir -p \"$(dirname \"$out\")\"\nprintf 'mcp-relayd %s source-abc\\n' > \"$out\"\n", filepath.Join(dir, "calls"), goos+"-"+goarch)
+	script = strings.Replace(script, "set -eu\n", "set -eu\nif [ -n \"${PACKAGE_LOG:-}\" ] && [ \"$GOOS-$GOARCH\" = linux-amd64 ]; then printf 'release-package\\n' >> \"$PACKAGE_LOG\"; fi\n", 1)
 	write(t, executable, script, 0o700)
 	// Mutate the caller's environment; a value copy silently used real Go.
 	f.env = append(f.env, "GO="+executable)

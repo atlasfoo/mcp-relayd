@@ -1,18 +1,23 @@
 # Flujo actual de GitHub Actions
 
-Este documento describe el orden implementado en `checks.yml`, `build.yml`,
-`release.yml` y `justfile`. Los checks locales no verifican el comportamiento
-real de `skip ci`, bypass de reglas, caché o artifacts en GitHub alojado; eso
-sigue pendiente de una ejecución autorizada.
+Este documento describe el orden implementado en `checks.yml`,
+`pipeline-checks.yml`, `build.yml`, `release.yml` y `justfile`. Los checks
+locales no verifican el comportamiento real de `skip ci`, bypass de reglas,
+caché o artifacts en GitHub alojado. La confirmación alojada anterior es
+anterior al refactor y no valida este pipeline.
 
 ## Cadena
 
 ```mermaid
 flowchart TD
-    PR[Pull request] --> CPR[Checks: restaura; no guarda]
-    PUSH[Push propio a master] --> CMP[Checks: restaura; guarda si falta]
+    PR[Pull request] --> CPR[Checks: valida app; restaura; no guarda]
+    PR -->|Cambios de pipeline| PCR[Pipeline Checks: suite aislada]
+    PUSH[Push propio a master] --> CMP[Checks: valida app; restaura; guarda si falta]
+    PUSH -->|Cambios de pipeline| PCP[Pipeline Checks: suite aislada]
     CMP -->|Éxito; evento push propio a master| BUILD[Build workflow_run]
     CPR --> END[Sin build/publicación]
+    PCR --> END
+    PCP --> END
     CMP -->|PR u otro origen| END
     BUILD -->|Candidato empaquetado; artifact cargado| PUSHJOB[Push privilegiado]
     BUILD -->|No elegible: termina antes de empaquetar/artifact| END
@@ -22,8 +27,11 @@ flowchart TD
     RELEASE --> PUBLISH[Verificar artifacts exactos y publicar/recuperar draft]
 ```
 
-Checks valida el SHA exacto, commits/título y calidad; sube metadata de
-procedencia. El Build se dispara con `workflow_run`, pero solo su job corre si
+`Checks` valida el SHA exacto, commits/título y calidad de aplicación; sube
+metadata de procedencia. `Pipeline Checks` es independiente y path-filtered:
+valida cambios de infraestructura, pero no produce releases ni dispara Build.
+El Build escucha exclusivamente el workflow `Checks` y se dispara con
+`workflow_run`, pero solo su job corre si
 Checks fue exitoso y provino de un `push` propio a `master`. Antes de empaquetar,
 Build verifica por API el run y artifact de Checks; usa tooling del checkout
 confiable (`trusted/`) y compila el SHA fuente en `source/`.
@@ -44,7 +52,7 @@ flowchart TD
     C2 --> C3[Instalar Nix fijado y bootstrap devenv fijado]
     C3 --> C4[devenv shell: provisiona mcp-proxy]
     C4 --> C5[ci-checks: valida evento, HEAD, base y commits/título]
-    C5 --> C6[go test, fmt, lint, typos, vet, check, integration sin caché, actionlint]
+    C5 --> C6[Gate app: check, go vet ./..., go test internal process/gateway/integration -count=1]
     C6 --> C7[Subir checks-metadata de procedencia]
     C7 --> C8{¿Push a master y cache key no existe?}
     C8 -->|Sí| C9[Exportar NARs y guardar caché compartida]
@@ -53,7 +61,17 @@ flowchart TD
     C10 --> C11
 ```
 
-El artifact metadata vincula SHA, repo, evento y run/attempt. Solo el push
+El gate local de app ejecuta `check`, `go vet ./...` y tests de integración
+para `internal/process`, `internal/gateway` e `internal/integration` con
+`-count=1`; el run sin caché evita reutilizar resultados de esos tests. No
+valida infraestructura. Para pedir esa validación local, ejecutar
+`just check-pipeline`; `just check-changes [BASE HEAD]` selecciona el gate de
+pipeline junto con el de app según los paths cambiados. La suite de pipeline es
+el módulo Go anidado `tests/release` (fmt, lint, vet y tests), `actionlint` y
+`unittest discover` con los 25 tests Python actuales en `tests/pipeline`. No
+ejecuta validación de caché. El workflow `Pipeline Checks` es independiente, activado
+por cambios de pipeline en PR/master, y no dispara Build. El artifact metadata
+vincula SHA, repo, evento y run/attempt. Solo el push
 exitoso a `master` guarda, y solo si no hubo cache hit exacto; PR siempre es
 lector. `workflow_run` de Build filtra adicionalmente por éxito, `push`, rama
 `master` y repo propio antes de asignar runner.
@@ -184,12 +202,18 @@ no un `/nix/store` compartido; caché fría debe funcionar. Cada entrada a
 `devenv shell` sigue provisionando `mcp-proxy` por separado. La reutilización
 entre workflows y runners alojados aún no está confirmada.
 
-## Mantenibilidad pendiente
+## Tooling confiable y límites de validación
 
-- Consolidar el gate duplicado de Checks sin perder integración sin caché ni actionlint.
-- Separar la provisión Python de los entornos de packaging/publicación.
-- Reducir duplicaciones en recetas/fixtures y tests acoplados a strings de YAML.
-- Valorar un smoke alojado de Actions para Skip CI, caché y reintentos reutilizables.
+- Build/Push/Release usan `justfile` y `tooling/release.py` del checkout
+  confiable (`trusted/`), no del checkout de source; Python se ejecuta aislado
+  con `python -I`. El checkout `source/` proporciona el SHA de aplicación.
+- PR y builds de desarrollo no producen paquetes. Release rechaza una llamada
+  no publicable.
+- `act` es una posibilidad futura, no una decisión adoptada ni un smoke test
+  ejecutado. Solo se deberían sustituir tests redundantes por una prueba con
+  cobertura real equivalente. La emulación no valida permisos de GitHub ni la
+  cadena de workflows y no reemplaza validación alojada.
 
-Estas mejoras quedan fuera de esta fase; no se retiran controles de procedencia
-ni recuperación para simplificar el flujo.
+La suite raíz de Go solo valida la aplicación: la infraestructura requiere
+`just check-pipeline` o `just check-changes`. No se reclama evidencia alojada
+del pipeline refactorizado.
