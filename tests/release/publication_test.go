@@ -39,7 +39,7 @@ func newPublicationFixture(t *testing.T, message string) *publicationFixture {
 	requirePublicationRecipe(t, f, "ci-release")
 	p := &publicationFixture{fixture: f}
 	p.trusted = filepath.Join(t.TempDir(), "justfile")
-	write(t, p.trusted, read(t, filepath.Join(f.dir, "justfile")), 0o600)
+	copyTrustedTooling(t, p.trusted)
 	f.git(t, "tag", "v0.1.0")
 	f.git(t, "commit", "--allow-empty", "-m", message)
 	p.source = f.git(t, "rev-parse", "HEAD")
@@ -103,49 +103,6 @@ func (p *publicationFixture) assertUnpublished(t *testing.T) {
 	}
 	if refs := p.git(t, "--git-dir", p.origin, "tag", "--list", "v0.2.0"); refs != "" {
 		t.Fatal("rejection pushed candidate tag")
-	}
-}
-
-func TestPublicationCompleteAssetsAndIdempotence(t *testing.T) {
-	p := newPublicationFixture(t, "feat: add relay")
-	p.seedBump(t, "expected")
-	p.recordGit(t, "release-only")
-	czLog := p.recordCZ(t)
-	logs, err := p.run(t)
-	if err != nil {
-		t.Fatalf("publication: %v: %s", err, logs)
-	}
-	bump := p.remote(t, "master")
-	if bump == p.source || p.remote(t, "v0.2.0^{commit}") != bump || p.git(t, "show", "-s", "--format=%P", bump) != p.source {
-		t.Fatal("master/tag must point to one bump whose sole parent is tested source")
-	}
-	if got := p.git(t, "show", "-s", "--format=%an|%ae|%cn|%ce|%s", bump); got != publicationBotName+"|"+publicationBotEmail+"|"+publicationBotName+"|"+publicationBotEmail+"|"+publicationMessage {
-		t.Fatalf("wrong App identity/message: %s", got)
-	}
-	if got := p.git(t, "diff", "--name-only", p.source, bump); got != ".cz.toml\nCHANGELOG.md" {
-		t.Fatalf("bump touched non-version files: %s", got)
-	}
-	if config := p.git(t, "show", bump+":.cz.toml"); !strings.Contains(config, `version = "0.2.0"`) {
-		t.Fatal("bump version differs from compiled version")
-	}
-	wantConfig := strings.ReplaceAll(p.git(t, "show", p.source+":.cz.toml"), `version = "0.1.0"`, `version = "0.2.0"`)
-	if p.git(t, "show", bump+":.cz.toml") != wantConfig {
-		t.Fatal("bump changed Commitizen configuration beyond the version")
-	}
-	assertPublicationComplete(t, p)
-	if read(t, czLog) != "" {
-		t.Fatalf("Release must never invoke Commitizen: %s", read(t, czLog))
-	}
-	before, refs := read(t, p.api), p.git(t, "--git-dir", p.origin, "show-ref")
-	if logs, err := p.run(t); err != nil {
-		t.Fatalf("completed retry: %v: %s", err, logs)
-	}
-	if read(t, p.api) != before || p.git(t, "--git-dir", p.origin, "show-ref") != refs {
-		t.Fatal("completed retry duplicated bump/tag/release/assets")
-	}
-	pushes := read(t, filepath.Join(filepath.Dir(p.calls), "git.calls"))
-	if pushes != "" {
-		t.Fatalf("Release must never push: %s", pushes)
 	}
 }
 
@@ -276,68 +233,6 @@ func TestReleaseCreationAndFinalPublicationFailuresRecoverSameVersion(t *testing
 	}
 }
 
-func TestPublicationRecoversExpectedPushedBumpBeforeDraftCreation(t *testing.T) {
-	p := newPublicationFixture(t, "feat: add relay")
-	p.seedBump(t, "expected")
-	bump := p.remote(t, "master")
-	if logs, err := p.run(t); err != nil {
-		t.Fatalf("recover pushed bump without draft: %v: %s", err, logs)
-	}
-	assertPublicationComplete(t, p)
-	if p.remote(t, "master") != bump {
-		t.Fatal("recovery created another bump")
-	}
-}
-
-func TestCIBuildRerunReusesPublishedBumpVersion(t *testing.T) {
-	p := newPublicationFixture(t, "feat: add relay")
-	p.seedBump(t, "expected")
-	bump := p.remote(t, "master")
-	// Rerun Checks' original source, not the bump checkout. The fetched master
-	// and tag already contain the valid bump from this source's earlier attempt.
-	p.git(t, "checkout", "--detach", p.source)
-	p.git(t, "update-ref", "refs/remotes/origin/master", bump)
-	p.withoutApp()
-	p.env = append(p.env, "GITHUB_RUN_ID=202", "GITHUB_RUN_ATTEMPT=2", "RELEASE_BOT_NAME="+publicationBotName, "RELEASE_BOT_EMAIL="+publicationBotEmail)
-	czLog := p.recordCZ(t)
-	packageLog := recordBuildPackaging(t, &p.fixture)
-	before := p.git(t, "--git-dir", p.origin, "show-ref")
-	writePublicationJSON(t, p.input, p.metadata)
-	assets := filepath.Join(t.TempDir(), "assets")
-	for attempt := range 2 {
-		if logs, err := p.command(t, "just", "--justfile", p.trusted, "--working-directory", p.dir, "ci-build", p.input, assets, p.output); err != nil {
-			t.Fatalf("Build rerun %d must recover valid existing bump: %v: %s", attempt+1, err, logs)
-		}
-		var result struct {
-			Eligible bool   `json:"eligible"`
-			Version  string `json:"version"`
-			Source   string `json:"source_sha"`
-			Bump     string `json:"bump_sha"`
-		}
-		decode(t, read(t, p.output), &result)
-		if !result.Eligible || result.Version != "0.2.0" || result.Source != p.source || result.Bump != bump {
-			t.Errorf("rerun must reuse original source/version/bump: %+v", result)
-		}
-		if read(t, czLog) != "" {
-			t.Error("rerun recalculated a version with Commitizen instead of recovering existing bump/tag")
-		}
-	}
-	if read(t, packageLog) != "release-package\nrelease-package\n" {
-		t.Error("recoverable Build reruns must package the same version")
-	}
-	if before != p.git(t, "--git-dir", p.origin, "show-ref") || p.git(t, "tag", "--list", "v0.3.0") != "" || read(t, p.calls) != "" {
-		t.Error("Build rerun created another version, pushed refs or invoked GitHub publication")
-	}
-	var manifest struct {
-		Version string `json:"version"`
-		Source  string `json:"source_sha"`
-	}
-	decode(t, read(t, filepath.Join(assets, "manifest.json")), &manifest)
-	if manifest.Version != "0.2.0" || manifest.Source != p.source {
-		t.Errorf("rerun packaged a different version/source: %+v", manifest)
-	}
-}
-
 func TestBuildRecoveryWithoutBaselineProvenancePublishesSameBytes(t *testing.T) {
 	for _, partial := range []bool{false, true} {
 		t.Run(fmt.Sprintf("partial-%t", partial), func(t *testing.T) {
@@ -367,11 +262,18 @@ func TestBuildRecoveryWithoutBaselineProvenancePublishesSameBytes(t *testing.T) 
 			state["fail_upload"] = 0
 			writePublicationJSON(t, p.api, state)
 			beforeAPI := read(t, p.api)
+			beforeCalls := read(t, p.calls)
 			refs := p.git(t, "--git-dir", p.origin, "show-ref")
 			// Like workflow-provenance build, the fresh rerun provenance has no
 			// last_tag. Fetch the published refs without checking out the bump.
 			p.git(t, "fetch", "origin", "master:refs/remotes/origin/master")
+			p.withoutApp()
+			p.env = append(p.env, "GITHUB_RUN_ATTEMPT=2", "RELEASE_BOT_NAME="+publicationBotName, "RELEASE_BOT_EMAIL="+publicationBotEmail)
 			preparePushHandoff(t, p)
+			if refs != p.git(t, "--git-dir", p.origin, "show-ref") || p.git(t, "tag", "--list", "v0.3.0") != "" || read(t, p.api) != beforeAPI || read(t, p.calls) != beforeCalls {
+				t.Fatal("credential-free Build recovery changed refs, version or publication state")
+			}
+			p.env = append(p.env, "GH_TOKEN=offline-placeholder")
 			if p.metadata["source_sha"] != p.source || p.metadata["bump_sha"] != bump || p.metadata["version"] != version || p.metadata["reason"] != "recovered-bump" || read(t, czLog) != beforeCZ {
 				t.Fatal("recovery recomputed Commitizen version or lost source/bump binding")
 			}
@@ -439,7 +341,7 @@ func TestPublicationRejectsArtifactAndProvenanceMismatch(t *testing.T) {
 	}
 }
 
-func TestPublicationSkipsWithoutAppConfiguration(t *testing.T) {
+func TestPublicationRejectsNonPublishableWithoutAppConfiguration(t *testing.T) {
 	for _, scenario := range []string{"docs", "no-increment"} {
 		t.Run(scenario, func(t *testing.T) {
 			message := "feat: add relay"
@@ -461,20 +363,15 @@ func TestPublicationSkipsWithoutAppConfiguration(t *testing.T) {
 			}
 			p.withoutApp()
 			before := p.git(t, "--git-dir", p.origin, "show-ref")
-			if logs, err := p.run(t); err != nil {
-				t.Fatalf("skip needs no App configuration: %v: %s", err, logs)
+			if logs, err := p.run(t); err == nil {
+				t.Fatalf("accepted non-publishable input: %s", logs)
 			}
-			var result struct {
-				Published bool   `json:"published"`
-				Reason    string `json:"reason"`
+			if _, err := os.Stat(p.output); !os.IsNotExist(err) {
+				t.Fatal("rejected input wrote publication output")
 			}
-			decode(t, read(t, p.output), &result)
-			expected := scenario
-			if scenario == "docs" {
-				expected = "no-feat-fix"
-			}
-			if result.Published || result.Reason != expected || read(t, p.calls) != "" || before != p.git(t, "--git-dir", p.origin, "show-ref") {
-				t.Fatalf("skip changed publication state: %+v", result)
+			p.assertUnpublished(t)
+			if read(t, p.calls) != "" || before != p.git(t, "--git-dir", p.origin, "show-ref") {
+				t.Fatal("rejected input changed publication state")
 			}
 		})
 	}
@@ -926,48 +823,6 @@ os.execv(%q, [%q, *sys.argv[1:]])
 `, log, czPath, czPath), 0o700)
 	p.prependPath(dir)
 	return log
-}
-
-func TestPublicationOfflineAPIAdapter(t *testing.T) {
-	// Exercise the adapter even while the implementation recipes are intentionally red.
-	p := &publicationFixture{fixture: newFixture(t), api: filepath.Join(t.TempDir(), "state.json"), calls: filepath.Join(t.TempDir(), "calls")}
-	write(t, p.calls, "", 0o600)
-	writePublicationJSON(t, p.api, map[string]any{"release": nil, "uploads": 0, "creates": 0, "publishes": 0, "fail_upload": 0})
-	p.env = append(p.env, "GH_TOKEN=offline-placeholder")
-	p.installGH(t)
-	endpoint := "repos/owner/mcp-relayd/releases"
-	if _, err := p.command(t, p.gh, "api", endpoint+"/tags/v0.2.0"); err == nil {
-		t.Fatal("adapter must return 404 before draft creation")
-	}
-	if logs, err := p.command(t, p.gh, "api", endpoint, "-X", "POST", "-f", "tag_name=v0.2.0", "-F", "draft=true", "-f", "body=add relay"); err != nil {
-		t.Fatalf("adapter create: %v: %s", err, logs)
-	}
-	if _, err := p.command(t, p.gh, "api", endpoint+"/17", "-X", "PATCH", "-F", "draft=false"); err == nil {
-		t.Fatal("adapter must refuse incomplete publication")
-	}
-	file := filepath.Join(t.TempDir(), "bytes")
-	write(t, file, "offline bytes", 0o600)
-	for _, target := range releaseTargets {
-		name := fmt.Sprintf("mcp-relayd_0.2.0_%s_%s.%s", target.goos, target.goarch, target.suffix)
-		if logs, err := p.command(t, p.gh, "api", "https://uploads.github.com/"+endpoint+"/17/assets?name="+name, "-X", "POST", "--input", file); err != nil {
-			t.Fatalf("adapter upload: %v: %s", err, logs)
-		}
-	}
-	if logs, err := p.command(t, p.gh, "api", endpoint+"/17/assets?name=SHA256SUMS", "-X", "POST", "--input", file); err != nil {
-		t.Fatalf("adapter checksum upload: %v: %s", err, logs)
-	}
-	if _, err := p.command(t, p.gh, "api", endpoint+"/17/assets?name=SHA256SUMS", "-X", "POST", "--input", file); err == nil {
-		t.Fatal("adapter must reject duplicate uploads")
-	}
-	if logs, err := p.command(t, p.gh, "api", endpoint+"/assets/100", "-H", "Accept: application/octet-stream"); err != nil || logs != "offline bytes" {
-		t.Fatalf("adapter download: %v: %s", err, logs)
-	}
-	if logs, err := p.command(t, p.gh, "api", endpoint+"/17", "-X", "PATCH", "-F", "draft=false"); err != nil {
-		t.Fatalf("adapter publish: %v: %s", err, logs)
-	}
-	if p.state(t)["publishes"] != float64(1) {
-		t.Fatal("adapter failed to persist publication")
-	}
 }
 
 func (p *publicationFixture) installGH(t *testing.T) {

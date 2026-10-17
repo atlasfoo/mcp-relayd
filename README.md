@@ -169,10 +169,27 @@ Inside the shell:
 ```sh
 run run       # Run the daemon; add --config PATH if needed.
 build         # Build bin/mcp-relayd.
-check         # Formatting, lint, spelling, and Go tests; no file changes.
-go vet ./...
-devenv test   # Full checks plus a smoke test using the real bridge.
+check         # App-only formatting, lint, spelling, and Go tests; no infra validation.
+go vet ./...  # App Go vet.
+devenv test   # App checks plus a smoke test using the real bridge.
+just check-pipeline             # Independent release/pipeline test suite.
+just check-changes              # App gate plus pipeline gate when changed inputs require it.
+just check-changes BASE HEAD    # Select gates over an explicit commit range.
 ```
+
+`go vet ./...` and `devenv test` are additional app checks; neither validates
+the nested pipeline module or CI infrastructure. Use `just check-pipeline` for
+that independent validation.
+
+The root Go module is the application: `go test ./...` (and `check`) does not
+discover or validate the nested `tests/release` module or CI infrastructure.
+Run `just check-pipeline` for that independent suite, or `just check-changes`
+to select it automatically for relevant changes. `Pipeline Checks` is a
+separate, path-filtered workflow; app-only and documentation changes do not
+trigger it. It neither produces releases nor triggers Build; Build still
+depends only on Checks. See [pipeline tests](tests/release/README.md) for scope,
+commands, and limits. The local workflow confirmation recorded at an earlier
+closure is not evidence that this refactored pipeline has passed on GitHub.
 
 For a Go-only build without Nix, install **Go 1.25 or later**:
 

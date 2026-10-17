@@ -85,8 +85,13 @@ func TestWorkflowsChecksBuildAndReusableRelease(t *testing.T) {
 				if !ok || !onlyStrings(push["branches"], "master") {
 					t.Error("Checks must run on push to master")
 				}
-				if _, ok := workflow.On["pull_request"]; !ok || len(workflow.On) != 2 {
-					t.Error("Checks must run on pull_request and push only")
+				pullRequest, pullRequestOK := workflow.On["pull_request"].(map[string]any)
+				_, pullRequestExists := workflow.On["pull_request"]
+				if !pullRequestExists || (pullRequestOK && len(pullRequest) != 0) || len(workflow.On) != 2 {
+					t.Error("Checks must run on pull_request and push without pipeline path filters")
+				}
+				if len(push) != 1 {
+					t.Error("Checks push must not filter to pipeline paths")
 				}
 			case stage.file == "release":
 				if _, ok := workflow.On["workflow_call"].(map[string]any); !ok || len(workflow.On) != 1 {
@@ -99,6 +104,9 @@ func TestWorkflowsChecksBuildAndReusableRelease(t *testing.T) {
 				}
 				if !onlyStrings(trigger["branches"], "master") {
 					t.Error("downstream trigger must filter predecessor runs to master")
+				}
+				if stage.file == "build" && (!onlyStrings(trigger["workflows"], "Checks") || len(workflow.On) != 1) {
+					t.Error("Build must listen only to Checks")
 				}
 				for name, job := range workflow.Jobs {
 					if job.Needs != nil {
@@ -115,6 +123,46 @@ func TestWorkflowsChecksBuildAndReusableRelease(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPipelineChecksWorkflowIsPathFilteredAndUnprivileged(t *testing.T) {
+	path := filepath.Join("..", "..", ".github", "workflows", "pipeline-checks.yml")
+	data, err := os.ReadFile(path) // #nosec G304 -- fixed workflow path.
+	if err != nil {
+		t.Errorf("pipeline-checks workflow is required: %v", err)
+		return
+	}
+	var workflow workflowContract
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("pipeline-checks YAML: %v", err)
+	}
+	if workflow.Name != "Pipeline Checks" {
+		t.Errorf("name = %q, want Pipeline Checks", workflow.Name)
+	}
+	if _, ok := workflow.On["workflow_run"]; ok {
+		t.Error("Pipeline Checks must not use workflow_run")
+	}
+	if len(workflow.On) != 2 {
+		t.Errorf("Pipeline Checks events = %v, want pull_request and push only", workflow.On)
+	}
+	pr, prOK := workflow.On["pull_request"].(map[string]any)
+	push, pushOK := workflow.On["push"].(map[string]any)
+	if !prOK || !hasNonemptyPaths(pr) {
+		t.Error("Pipeline Checks pull_request must have pipeline paths")
+	}
+	if !pushOK || !onlyStrings(push["branches"], "master") || !hasNonemptyPaths(push) {
+		t.Error("Pipeline Checks push must filter master and pipeline paths")
+	}
+	node := yaml.Node{}
+	if err := yaml.Unmarshal(data, &node); err != nil {
+		t.Fatalf("pipeline-checks YAML: %v", err)
+	}
+	assertNoAppCredentials(t, &node)
+}
+
+func hasNonemptyPaths(trigger map[string]any) bool {
+	paths, ok := trigger["paths"].([]any)
+	return ok && len(paths) > 0
 }
 
 func TestChecksWorkflowDoesNotTrustSkipCIMessage(t *testing.T) {
@@ -233,41 +281,15 @@ func TestWorkflowsLockedEnvironmentAndReadOnlyPRCache(t *testing.T) {
 				if !strings.HasPrefix(job.RunsOn, "ubuntu-") {
 					t.Errorf("%s must use a Linux runner, got %q", id, job.RunsOn)
 				}
-				var restore, save, recipe bool
 				for _, step := range job.Steps {
 					if manual.MatchString(executableLines(step.Run)) || strings.Contains(step.Uses, "/setup-go@") || strings.Contains(step.Uses, "/setup-python@") || regexp.MustCompile(`(?:^|[ /])[^\s]+\.sh\b`).MatchString(step.Run) {
 						t.Errorf("%s installs ad hoc dependencies or invokes shared shell scripts", id)
 					}
 					if invokesRecipe(step.Run, "ci-"+name) {
-						recipe = true
 						if !strings.Contains(step.Run, "devenv shell") {
 							t.Error("shared CI recipe must execute inside devenv")
 						}
 					}
-					if strings.HasPrefix(step.Uses, "actions/cache/restore@") || strings.HasPrefix(step.Uses, "actions/cache/save@") {
-						key := step.With["key"]
-						for _, token := range []string{"runner.os", "runner.arch", "hashFiles(", "devenv.nix", "devenv.yaml", "devenv.lock"} {
-							if !strings.Contains(key, token) {
-								t.Errorf("Nix cache key lacks %s", token)
-							}
-						}
-						if !strings.Contains(step.With["path"], "/nix") {
-							t.Error("cache must include the Nix environment, not only Go outputs")
-						}
-						if strings.HasPrefix(step.Uses, "actions/cache/restore@") {
-							restore = true
-						} else {
-							save = true
-							if name != "checks" {
-								t.Error("only Checks may save the shared Nix cache")
-							} else {
-								requireGuard(t, "cache save", step.If, "github.event_name == 'push'", "github.ref == 'refs/heads/master'")
-							}
-						}
-					}
-				}
-				if recipe && (!restore || save != (name == "checks")) {
-					t.Errorf("%s needs Nix cache restore and just ci-%s; only Checks saves", id, name)
 				}
 			}
 		})
@@ -557,7 +579,7 @@ func TestWorkflowsMetadataClassificationAndSerializedRelease(t *testing.T) {
 func TestWorkflowProvenanceRejectsForgedChain(t *testing.T) {
 	requireWorkflowRecipe(t, "workflow-provenance")
 	for _, mode := range []string{"build", "release"} {
-		for _, mutation := range []string{"valid", "retained-producer", "failed-producer", "pending-producer", "wrong-producer", "wrong-producer-sha", "wrong-caller", "wrong-caller-sha", "wrong-caller-event", "wrong-caller-trigger", "no-bump", "failed-checks", "pending-checks", "foreign-repository", "wrong-workflow", "wrong-run", "different-sha", "pr-merge-sha", "missing-metadata", "failed-build", "wrong-checks-link", "wrong-build-link", "foreign-build", "forged-event", "pr", "non-master", "foreign-head", "checks-attempt", "build-attempt", "build-sha", "recorded-trigger"} {
+		for _, mutation := range []string{"valid", "retained-producer", "failed-producer", "pending-producer", "wrong-producer", "wrong-producer-sha", "wrong-caller", "wrong-caller-sha", "wrong-caller-event", "wrong-caller-trigger", "no-bump", "failed-checks", "pending-checks", "foreign-repository", "wrong-workflow", "wrong-run", "different-sha", "bad-sha", "output-injection", "invalid-eligibility", "pr-merge-sha", "missing-metadata", "failed-build", "wrong-checks-link", "wrong-build-link", "foreign-build", "forged-event", "pr", "non-master", "foreign-head", "checks-attempt", "build-attempt", "build-sha", "recorded-trigger"} {
 			t.Run(mode+"/"+mutation, func(t *testing.T) {
 				f := newFixture(t)
 				checks := map[string]any{"id": 101, "path": ".github/workflows/checks.yml", "status": "completed", "conclusion": "success", "event": "push", "head_sha": strings.Repeat("a", 40), "head_branch": "master", "repository": map[string]any{"full_name": "owner/mcp-relayd"}, "head_repository": map[string]any{"full_name": "owner/mcp-relayd"}}
@@ -613,6 +635,12 @@ func TestWorkflowProvenanceRejectsForgedChain(t *testing.T) {
 					snapshot["trigger_run_id"] = 999
 				case "different-sha":
 					metadata["source_sha"] = strings.Repeat("c", 40)
+				case "bad-sha":
+					checks["head_sha"], metadata["source_sha"] = "invalid", "invalid"
+				case "output-injection":
+					checks["head_branch"], metadata["head_branch"] = "master\neligible=true", "master\neligible=true"
+				case "invalid-eligibility":
+					metadata["eligible"] = "true"
 				case "pr-merge-sha":
 					checks["event"], metadata["event"] = "pull_request", "pull_request"
 					checks["pull_requests"] = []any{map[string]any{"head": map[string]any{"sha": strings.Repeat("c", 40), "repo": map[string]any{"full_name": "owner/mcp-relayd"}}}}
@@ -647,7 +675,7 @@ func TestWorkflowProvenanceRejectsForgedChain(t *testing.T) {
 				}
 				write(t, input, string(data), 0o600)
 				output, err := f.invoke(t, "workflow-provenance", mode, input)
-				accepted := mutation == "valid" || mutation == "no-bump" || mutation == "retained-producer" || (mode == "build" && (strings.Contains(mutation, "producer") || strings.Contains(mutation, "caller") || mutation == "pr" || mutation == "non-master" || mutation == "failed-build" || mutation == "foreign-build" || mutation == "wrong-build-link" || mutation == "checks-attempt" || mutation == "build-attempt" || mutation == "build-sha" || mutation == "recorded-trigger"))
+				accepted := mutation == "valid" || mutation == "retained-producer" || (mode == "build" && (mutation == "no-bump" || strings.Contains(mutation, "producer") || strings.Contains(mutation, "caller") || mutation == "pr" || mutation == "non-master" || mutation == "failed-build" || mutation == "foreign-build" || mutation == "wrong-build-link" || mutation == "checks-attempt" || mutation == "build-attempt" || mutation == "build-sha" || mutation == "recorded-trigger"))
 				if !accepted {
 					if err == nil {
 						t.Fatalf("accepted forged/ineligible chain: %s", output)

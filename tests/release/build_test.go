@@ -87,7 +87,7 @@ exec %q "$@"
 			input, output, assets := filepath.Join(directory, "provenance.json"), filepath.Join(directory, "output.json"), filepath.Join(directory, "assets")
 			writePublicationJSON(t, input, map[string]any{"verified": true, "repository": "owner/mcp-relayd", "head_repository": "owner/mcp-relayd", "event": "push", "head_branch": "master", "checks_run_id": 101, "source_sha": source, "last_tag": "v0.1.0"})
 			trusted := filepath.Join(t.TempDir(), "justfile")
-			write(t, trusted, read(t, filepath.Join(f.dir, "justfile")), 0o600)
+			copyTrustedTooling(t, trusted)
 			f.env = append(f.env, "CI_JUSTFILE="+trusted, "GITHUB_RUN_ID=202")
 			before := f.snapshot(t)
 			logs, err := f.command(t, "just", "--justfile", trusted, "--working-directory", f.dir, "ci-build", input, assets, output)
@@ -132,28 +132,13 @@ exec %q "$@"
 	}
 }
 
-// Record delegated packaging calls while executing the real just recipes.
+// Record the packaging subprocess boundary, without requiring internal just calls.
 func recordBuildPackaging(t *testing.T, f *fixture) string {
 	t.Helper()
-	justPath, err := f.command(t, "sh", "-c", "command -v just")
-	if err != nil {
-		t.Fatal(err)
-	}
 	directory := t.TempDir()
 	log := filepath.Join(directory, "calls")
 	write(t, log, "", 0o600)
-	write(t, filepath.Join(directory, "just"), fmt.Sprintf(`#!/usr/bin/env python3
-import os, sys
-if 'release-package' in sys.argv[1:]:
-    with open(%q, 'a', encoding='utf-8') as output:
-        output.write('release-package\n')
-os.execv(%q, [%q, *sys.argv[1:]])
-`, log, justPath, justPath), 0o700)
-	for i, entry := range f.env {
-		if path, ok := strings.CutPrefix(entry, "PATH="); ok {
-			f.env[i] = "PATH=" + directory + ":" + path
-		}
-	}
+	f.env = append(f.env, "PACKAGE_LOG="+log)
 	return log
 }
 
@@ -218,7 +203,7 @@ func TestCIBuildClassificationAndTrustedRecipes(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			f := newFixture(t)
 			trusted := filepath.Join(t.TempDir(), "justfile")
-			write(t, trusted, read(t, filepath.Join(f.dir, "justfile")), 0o600)
+			copyTrustedTooling(t, trusted)
 			// Candidate recipes cannot delegate back to this worktree's justfile.
 			write(t, filepath.Join(f.dir, "justfile"), "ci-build:\n    exit 97\n", 0o600)
 			f.git(t, "add", ".")
@@ -255,6 +240,7 @@ func TestCIBuildClassificationAndTrustedRecipes(t *testing.T) {
 			} else {
 				czLog = f.mockCZ(t, czCode, "0.2.0", 0)
 			}
+			packageLog := recordBuildPackaging(t, &f)
 			goPath := installMockGo(t, &f, "linux", "amd64")
 			if scenario == "package-error" {
 				write(t, goPath, "#!/bin/sh\nexit 98\n", 0o700)
@@ -291,6 +277,7 @@ func TestCIBuildClassificationAndTrustedRecipes(t *testing.T) {
 				if _, err := os.Stat(assets); !os.IsNotExist(err) || read(t, czLog) != "" {
 					t.Fatal("ineligible origin packaged or invoked Commitizen")
 				}
+				assertBuildDidNotPackage(t, packageLog, goPath, output, assets)
 				return
 			}
 			var got struct {
@@ -302,16 +289,11 @@ func TestCIBuildClassificationAndTrustedRecipes(t *testing.T) {
 				Checks   int    `json:"checks_run_id"`
 			}
 			decode(t, read(t, output), &got)
-			eligible := scenario == "master-feature"
-			if got.Source != head || got.Eligible != eligible || got.Build != 202 || got.Checks != 101 {
+			if got.Source != head || !got.Eligible || got.Build != 202 || got.Checks != 101 {
 				t.Fatalf("wrong metadata: %+v", got)
 			}
-			if eligible {
-				if got.Version != "0.2.0" || got.Class != "release" {
-					t.Fatalf("release classification: %+v", got)
-				}
-			} else if got.Class != "dev" || got.Version != "0.0.0-dev.202+"+head[:12] || read(t, czLog) != "" {
-				t.Fatalf("development classification: %+v, cz calls %q", got, read(t, czLog))
+			if got.Version != "0.2.0" || got.Class != "release" {
+				t.Fatalf("release classification: %+v", got)
 			}
 			var manifest struct {
 				Source string           `json:"source_sha"`
@@ -327,7 +309,7 @@ func TestCIBuildClassificationAndTrustedRecipes(t *testing.T) {
 	}
 }
 
-func TestBuildProvenanceRealPRHeadAndSafeOutputs(t *testing.T) {
+func TestChecksProvenanceRealPRHeadAndSafeOutputs(t *testing.T) {
 	for _, scenario := range []string{"fork-pr", "api-id", "foreign-id", "bad-sha", "output-injection", "wrong-repo", "ambiguous-pr", "missing-pr"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newFixture(t)
@@ -370,10 +352,9 @@ func TestBuildProvenanceRealPRHeadAndSafeOutputs(t *testing.T) {
 			}
 			var got struct {
 				Source string `json:"source_sha"`
-				Class  string `json:"artifact_class"`
 			}
 			decode(t, output, &got)
-			if got.Source != head || got.Class != "dev" {
+			if got.Source != head {
 				t.Fatalf("wrong fork provenance: %+v", got)
 			}
 		})

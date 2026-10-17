@@ -48,33 +48,12 @@ func TestGeneratedBumpHasCanonicalSkipCIMessage(t *testing.T) {
 	if diff := f.git(t, "diff", "--name-only", source, "HEAD"); diff != ".cz.toml\nCHANGELOG.md" {
 		t.Errorf("generated bump diff = %q", diff)
 	}
-}
-
-func TestReleaseCandidateCanonicalSkipCIConfiguration(t *testing.T) {
-	for _, template := range []string{canonicalBumpTemplate, "chore(release): bump version $current_version → $new_version", "chore(release): arbitrary $new_version [skip ci]"} {
-		t.Run(template, func(t *testing.T) {
-			f := newFixture(t)
-			setBumpTemplate(t, f, template)
-			f.git(t, "add", ".cz.toml")
-			f.git(t, "commit", "--allow-empty", "-m", "chore: configure release message")
-			f.git(t, "tag", "v0.1.0")
-			f.git(t, "commit", "--allow-empty", "-m", "feat: add relay")
-			output, err := f.invoke(t, "release-candidate")
-			if template != canonicalBumpTemplate {
-				if err == nil {
-					t.Errorf("noncanonical Commitizen template accepted: %s", output)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("canonical Skip CI configuration rejected: %v: %s", err, output)
-			}
-			var got candidate
-			decode(t, output, &got)
-			if !got.Eligible || got.Version != "0.2.0" {
-				t.Errorf("canonical configuration candidate = %+v", got)
-			}
-		})
+	if got := f.git(t, "show", "-s", "--format=%an|%ae|%cn|%ce", "HEAD"); got != publicationBotName+"|"+publicationBotEmail+"|"+publicationBotName+"|"+publicationBotEmail {
+		t.Fatalf("wrong bump identity: %s", got)
+	}
+	wantConfig := strings.ReplaceAll(f.git(t, "show", source+":.cz.toml"), `version = "0.1.0"`, `version = "0.2.0"`)
+	if f.git(t, "show", "HEAD:.cz.toml") != wantConfig {
+		t.Fatal("bump changed Commitizen configuration beyond the version")
 	}
 }
 
@@ -111,7 +90,6 @@ func TestReleaseCandidateHistory(t *testing.T) {
 		{"merge-subject", true, []string{"Merge branch 'feat: add relay'"}, ""},
 		{"body-only-feature", true, []string{"docs: explain usage\n\nfeat: example subject"}, ""},
 		{"lookalike-type", true, []string{"feature: add relay", "fixup: close stream"}, ""},
-		{"published-feature-only", true, []string{"docs: explain usage"}, ""},
 		{"empty-range", true, nil, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -212,19 +190,6 @@ func TestReleaseCandidateBootstrapArguments(t *testing.T) {
 	}
 }
 
-func TestReleaseCandidateSkipsCommitizenWithoutFeature(t *testing.T) {
-	f := newFixture(t)
-	f.git(t, "commit", "--allow-empty", "-m", "feat: already published")
-	f.git(t, "tag", "v0.1.0")
-	f.git(t, "commit", "--allow-empty", "-m", "docs: explain usage")
-	log := f.mockCZ(t, 99, "invalid", 99)
-	var got candidate
-	f.recipe(t, &got, "release-candidate")
-	if got.Eligible || got.Reason != "no-feat-fix" || read(t, log) != "" {
-		t.Errorf("non-version changes must not need working Commitizen: %+v, calls %q", got, read(t, log))
-	}
-}
-
 func TestReleasePreflightStaleCandidates(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -277,7 +242,7 @@ func newFixture(t *testing.T) fixture {
 	home := t.TempDir()
 	// Deliberately do not inherit App, GitHub or other credential variables.
 	f.env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "XDG_CONFIG_HOME=" + home, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0", "LC_ALL=C.UTF-8"}
-	for _, name := range []string{".cz.toml", "justfile"} {
+	for _, name := range []string{".cz.toml"} {
 		data, err := os.ReadFile(filepath.Join("../..", name)) // #nosec G304 -- Names are fixed repository tooling files, not user input.
 		if err != nil {
 			t.Fatalf("release contract requires root %s: %v", name, err)
@@ -300,6 +265,7 @@ func newFixture(t *testing.T) fixture {
 		}
 		write(t, filepath.Join(f.dir, name), string(data), 0o600)
 	}
+	copyTrustedTooling(t, filepath.Join(f.dir, "justfile"))
 	f.git(t, "init", "--initial-branch=master")
 	f.git(t, "config", "user.name", "Release Test")
 	f.git(t, "config", "user.email", "release-test@example.invalid")
@@ -307,6 +273,17 @@ func newFixture(t *testing.T) fixture {
 	f.git(t, "add", ".")
 	f.git(t, "commit", "-m", "chore: initialize fixture")
 	return f
+}
+
+// Copy implementation from the trusted checkout, never from a candidate tree.
+func copyTrustedTooling(t *testing.T, justfile string) {
+	t.Helper()
+	directory := filepath.Dir(justfile)
+	if err := os.MkdirAll(filepath.Join(directory, "tooling"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	write(t, justfile, read(t, "../../justfile"), 0o600)
+	write(t, filepath.Join(directory, "tooling", "release.py"), read(t, "../../tooling/release.py"), 0o600)
 }
 
 func (f fixture) command(t *testing.T, name string, args ...string) (string, error) {

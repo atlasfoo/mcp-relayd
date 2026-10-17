@@ -425,7 +425,7 @@ func rewritePushBundle(t *testing.T, p *publicationFixture, extra bool) {
 }
 
 func TestHandoffAPIBindsExactArtifactAndRetainedSuccessfulProducer(t *testing.T) {
-	for _, mutation := range []string{"valid-rerun", "wrong-id", "wrong-name", "expired", "wrong-run", "wrong-sha", "failed-producer", "duplicate-producer"} {
+	for _, mutation := range []string{"valid-rerun", "wrong-id", "wrong-name", "expired", "wrong-run", "wrong-sha", "failed-producer", "duplicate-producer", "missing-producer", "producer-run", "producer-attempt", "input-attempt", "foreign-caller", "caller-ref"} {
 		t.Run(mutation, func(t *testing.T) {
 			p := newPublicationFixture(t, "feat: add relay")
 			source, workflowSHA := p.source, strings.Repeat("b", 40)
@@ -436,7 +436,20 @@ func TestHandoffAPIBindsExactArtifactAndRetainedSuccessfulProducer(t *testing.T)
 			artifactRun := map[string]any{"id": 202, "head_sha": workflowSHA}
 			artifact := map[string]any{"id": 505, "name": "release-202-1", "expired": false, "workflow_run": artifactRun}
 			jobs := []any{producer}
+			caller := "owner/mcp-relayd/.github/workflows/build.yml@refs/heads/master"
 			switch mutation {
+			case "missing-producer":
+				jobs = []any{}
+			case "producer-run":
+				producer["run_id"] = 999
+			case "producer-attempt":
+				producer["run_attempt"] = 2
+			case "input-attempt":
+				metadata["build_run_attempt"] = 2
+			case "foreign-caller":
+				caller = "attacker/other/.github/workflows/build.yml@refs/heads/master"
+			case "caller-ref":
+				caller = "owner/mcp-relayd/.github/workflows/build.yml@refs/heads/topic"
 			case "wrong-id":
 				artifact["id"] = 999
 			case "wrong-name":
@@ -463,7 +476,7 @@ func TestHandoffAPIBindsExactArtifactAndRetainedSuccessfulProducer(t *testing.T)
 			writePublicationJSON(t, filepath.Join(p.assets, "build-metadata.json"), metadata)
 			event := filepath.Join(t.TempDir(), "event.json")
 			writePublicationJSON(t, event, map[string]any{"workflow_run": map[string]any{"id": 101}})
-			p.env = append(p.env, "GITHUB_RUN_ID=202", "GITHUB_WORKFLOW_REF=owner/mcp-relayd/.github/workflows/build.yml@refs/heads/master", "GITHUB_SHA="+workflowSHA, "GITHUB_EVENT_NAME=workflow_run", "GITHUB_EVENT_PATH="+event)
+			p.env = append(p.env, "GITHUB_RUN_ID=202", "GITHUB_WORKFLOW_REF="+caller, "GITHUB_SHA="+workflowSHA, "GITHUB_EVENT_NAME=workflow_run", "GITHUB_EVENT_PATH="+event)
 			logs, err := p.command(t, "just", "--justfile", p.trusted, "workflow-handoff", p.assets, "1", "505", p.input)
 			if err == nil {
 				logs, err = p.command(t, "just", "--justfile", p.trusted, "workflow-provenance", "release", p.input, p.output)
@@ -471,6 +484,11 @@ func TestHandoffAPIBindsExactArtifactAndRetainedSuccessfulProducer(t *testing.T)
 			if mutation == "valid-rerun" {
 				if err != nil {
 					t.Fatalf("retained producer rejected by API handoff: %v: %s", err, logs)
+				}
+				var verified map[string]any
+				decode(t, read(t, p.output), &verified)
+				if verified["build_run_attempt"] != float64(1) || verified["build_run_id"] != float64(202) {
+					t.Fatal("retry replaced retained producer run/attempt with current caller attempt")
 				}
 			} else if err == nil {
 				t.Fatalf("forged API producer/artifact accepted: %s", logs)

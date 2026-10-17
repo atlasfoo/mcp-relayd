@@ -98,7 +98,7 @@ func TestChecksSkipCIRequiresStructuralOwnBump(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Checks should skip safely or validate normally: %v: %s", err, output)
 			}
-			wantCommands := [][]string{{"go", "test", "./..."}, {"golangci-lint", "fmt", "--diff", "./..."}, {"golangci-lint", "run", "./..."}, {"typos", "--force-exclude", "."}, {"go", "vet", "./..."}, {"check"}, {"go", "test", "./internal/process", "./internal/gateway", "./internal/integration", "-count=1"}, {"actionlint", "-shellcheck=", "-pyflakes="}}
+			wantCommands := [][]string{{"check"}, {"go", "vet", "./..."}, {"go", "test", "./internal/process", "./internal/gateway", "./internal/integration", "-count=1"}}
 			if scenario == "canonical" {
 				wantCommands = nil
 			}
@@ -233,7 +233,7 @@ sys.exit(1 if os.environ.get("CHECKS_TEST_FAIL") else 0)
 				}
 				commands = append(commands, command)
 			}
-			wantCommands := [][]string{{"go", "test", "./..."}, {"golangci-lint", "fmt", "--diff", "./..."}, {"golangci-lint", "run", "./..."}, {"typos", "--force-exclude", "."}, {"go", "vet", "./..."}, {"check"}, {"go", "test", "./internal/process", "./internal/gateway", "./internal/integration", "-count=1"}, {"actionlint", "-shellcheck=", "-pyflakes="}}
+			wantCommands := [][]string{{"check"}, {"go", "vet", "./..."}, {"go", "test", "./internal/process", "./internal/gateway", "./internal/integration", "-count=1"}}
 			if !reflect.DeepEqual(commands, wantCommands) {
 				t.Errorf("serial gate commands = %v", commands)
 			}
