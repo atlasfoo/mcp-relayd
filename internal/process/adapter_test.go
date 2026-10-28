@@ -141,6 +141,276 @@ func TestExecAdapterReadinessPollingStopsWhenContextIsCanceled(t *testing.T) {
 	}
 }
 
+func TestIsolatedEnvironmentFor(t *testing.T) {
+	const parentOnly = "MCP_RELAYD_PARENT_ONLY_SENTINEL"
+
+	tests := []struct {
+		name       string
+		goos       string
+		lookup     map[string]string
+		configured map[string]string
+		want       map[string]string
+	}{
+		{
+			name: "windows copies baseline keys present in the lookup",
+			goos: "windows",
+			lookup: map[string]string{
+				"PATH":         `C:\Windows\System32`,
+				"SystemRoot":   `C:\Windows`,
+				"WINDIR":       `C:\Windows`,
+				"USERPROFILE":  `C:\Users\relay`,
+				"HOMEDRIVE":    `C:`,
+				"HOMEPATH":     `\Users\relay`,
+				"APPDATA":      `C:\Users\relay\AppData\Roaming`,
+				"LOCALAPPDATA": `C:\Users\relay\AppData\Local`,
+				"HOME":         `C:\Users\relay`,
+				"TEMP":         `C:\Users\relay\AppData\Local\Temp`,
+				"TMP":          "",
+				parentOnly:     "must-not-leak",
+			},
+			configured: map[string]string{"MCP_MODE": "test"},
+			want: map[string]string{
+				"PATH":         `C:\Windows\System32`,
+				"SystemRoot":   `C:\Windows`,
+				"WINDIR":       `C:\Windows`,
+				"USERPROFILE":  `C:\Users\relay`,
+				"HOMEDRIVE":    `C:`,
+				"HOMEPATH":     `\Users\relay`,
+				"APPDATA":      `C:\Users\relay\AppData\Roaming`,
+				"LOCALAPPDATA": `C:\Users\relay\AppData\Local`,
+				"HOME":         `C:\Users\relay`,
+				"TEMP":         `C:\Users\relay\AppData\Local\Temp`,
+				"TMP":          "",
+				"MCP_MODE":     "test",
+			},
+		},
+		{
+			name: "windows omits absent baseline keys and foreign lookup keys",
+			goos: "windows",
+			lookup: map[string]string{
+				"PATH":       `C:\Windows\System32`,
+				"SystemRoot": "",
+				parentOnly:   "must-not-leak",
+			},
+			want: map[string]string{
+				"PATH":       `C:\Windows\System32`,
+				"SystemRoot": "",
+			},
+		},
+		{
+			name: "windows derives HOME from lookup USERPROFILE when HOME is absent",
+			goos: "windows",
+			lookup: map[string]string{
+				"PATH":        `C:\Windows\System32`,
+				"USERPROFILE": `C:\Users\relay`,
+				parentOnly:    "must-not-leak",
+			},
+			want: map[string]string{
+				"PATH":        `C:\Windows\System32`,
+				"USERPROFILE": `C:\Users\relay`,
+				"HOME":        `C:\Users\relay`,
+			},
+		},
+		{
+			name: "windows derives HOME from lookup USERPROFILE when HOME is empty",
+			goos: "windows",
+			lookup: map[string]string{
+				"PATH":        `C:\Windows\System32`,
+				"USERPROFILE": `C:\Users\relay`,
+				"HOME":        "",
+				parentOnly:    "must-not-leak",
+			},
+			want: map[string]string{
+				"PATH":        `C:\Windows\System32`,
+				"USERPROFILE": `C:\Users\relay`,
+				"HOME":        `C:\Users\relay`,
+			},
+		},
+		{
+			name: "windows derives HOME from configured USERPROFILE",
+			goos: "windows",
+			lookup: map[string]string{
+				"PATH":        `C:\Windows\System32`,
+				"USERPROFILE": `C:\Users\from-lookup`,
+				parentOnly:    "must-not-leak",
+			},
+			configured: map[string]string{"USERPROFILE": `C:\Users\from-config`},
+			want: map[string]string{
+				"PATH":        `C:\Windows\System32`,
+				"USERPROFILE": `C:\Users\from-config`,
+				"HOME":        `C:\Users\from-config`,
+			},
+		},
+		{
+			name: "windows configured userprofile replaces USERPROFILE",
+			goos: "windows",
+			lookup: map[string]string{
+				"PATH":        `C:\Windows\System32`,
+				"USERPROFILE": `C:\Users\from-lookup`,
+				parentOnly:    "must-not-leak",
+			},
+			configured: map[string]string{
+				"userprofile": `C:\Users\from-config`,
+				"HOME":        `D:\keep`,
+			},
+			want: map[string]string{
+				"PATH":        `C:\Windows\System32`,
+				"userprofile": `C:\Users\from-config`,
+				"HOME":        `D:\keep`,
+			},
+		},
+		{
+			name: "windows derives HOME from configured userprofile",
+			goos: "windows",
+			lookup: map[string]string{
+				"PATH":        `C:\Windows\System32`,
+				"USERPROFILE": `C:\Users\from-lookup`,
+				parentOnly:    "must-not-leak",
+			},
+			configured: map[string]string{"userprofile": `C:\Users\from-config`},
+			want: map[string]string{
+				"PATH":        `C:\Windows\System32`,
+				"userprofile": `C:\Users\from-config`,
+				"HOME":        `C:\Users\from-config`,
+			},
+		},
+		{
+			name: "windows does not derive a configured HOME even when it is empty",
+			goos: "windows",
+			lookup: map[string]string{
+				"PATH":        `C:\Windows\System32`,
+				"USERPROFILE": `C:\Users\relay`,
+				"HOME":        `C:\Users\from-lookup`,
+				parentOnly:    "must-not-leak",
+			},
+			configured: map[string]string{"HOME": ""},
+			want: map[string]string{
+				"PATH":        `C:\Windows\System32`,
+				"USERPROFILE": `C:\Users\relay`,
+				"HOME":        "",
+			},
+		},
+		{
+			name: "windows keeps a configured HOME instead of deriving it",
+			goos: "windows",
+			lookup: map[string]string{
+				"PATH":        `C:\Windows\System32`,
+				"USERPROFILE": `C:\Users\relay`,
+				parentOnly:    "must-not-leak",
+			},
+			configured: map[string]string{"HOME": `D:\custom`},
+			want: map[string]string{
+				"PATH":        `C:\Windows\System32`,
+				"USERPROFILE": `C:\Users\relay`,
+				"HOME":        `D:\custom`,
+			},
+		},
+		{
+			name: "windows does not derive HOME from an empty USERPROFILE",
+			goos: "windows",
+			lookup: map[string]string{
+				"PATH":        `C:\Windows\System32`,
+				"USERPROFILE": "",
+				parentOnly:    "must-not-leak",
+			},
+			want: map[string]string{
+				"PATH":        `C:\Windows\System32`,
+				"USERPROFILE": "",
+			},
+		},
+		{
+			name: "linux baseline is PATH plus configured values and does not derive HOME",
+			goos: "linux",
+			lookup: map[string]string{
+				"PATH":        "",
+				"HOME":        "/home/relay",
+				"USERPROFILE": `C:\Users\relay`,
+				"SystemRoot":  `C:\Windows`,
+				"WINDIR":      `C:\Windows`,
+				parentOnly:    "must-not-leak",
+			},
+			configured: map[string]string{"MCP_MODE": "test"},
+			want: map[string]string{
+				"PATH":     "",
+				"MCP_MODE": "test",
+			},
+		},
+		{
+			name: "linux keeps configured HOME and does not copy other lookup keys",
+			goos: "linux",
+			lookup: map[string]string{
+				"PATH":        "/usr/bin",
+				"HOME":        "/home/lookup",
+				"USERPROFILE": "/users/relay",
+				parentOnly:    "must-not-leak",
+			},
+			configured: map[string]string{"HOME": ""},
+			want: map[string]string{
+				"PATH": "/usr/bin",
+				"HOME": "",
+			},
+		},
+		{
+			name: "darwin baseline is PATH plus configured values and does not derive HOME",
+			goos: "darwin",
+			lookup: map[string]string{
+				"PATH":        "",
+				"HOME":        "/Users/relay",
+				"USERPROFILE": `C:\Users\relay`,
+				"SystemRoot":  `C:\Windows`,
+				"WINDIR":      `C:\Windows`,
+				parentOnly:    "must-not-leak",
+			},
+			configured: map[string]string{"MCP_MODE": "test"},
+			want: map[string]string{
+				"PATH":     "",
+				"MCP_MODE": "test",
+			},
+		},
+		{
+			name: "darwin keeps configured HOME and does not copy other lookup keys",
+			goos: "darwin",
+			lookup: map[string]string{
+				"PATH":        "/usr/bin",
+				"HOME":        "/Users/lookup",
+				"USERPROFILE": "/Users/relay",
+				parentOnly:    "must-not-leak",
+			},
+			configured: map[string]string{"HOME": "/Users/configured"},
+			want: map[string]string{
+				"PATH": "/usr/bin",
+				"HOME": "/Users/configured",
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := isolatedEnvironmentFor(test.goos, func(key string) (string, bool) {
+				value, ok := test.lookup[key]
+				return value, ok
+			}, test.configured)
+			want := sortedEnvironment(test.want)
+			if !slices.Equal(got, want) {
+				t.Errorf("isolatedEnvironmentFor(%q) = %#v, want %#v", test.goos, got, want)
+			}
+		})
+	}
+}
+
+func sortedEnvironment(values map[string]string) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	entries := make([]string, 0, len(keys))
+	for _, key := range keys {
+		entries = append(entries, key+"="+values[key])
+	}
+	return entries
+}
+
 func newAdapterUnderTest(t *testing.T, logger *slog.Logger) *execAdapter {
 	t.Helper()
 	adapter, ok := NewExecAdapter(logger).(*execAdapter)

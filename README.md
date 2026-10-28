@@ -122,7 +122,7 @@ Server names (the `<name>` in `[servers.<name>]`) must begin with an ASCII lette
 
 Commands and arguments are executed **without a shell**: shell operators, `~`, and variable references in `command`, `args`, or `cwd` are not expanded. Use full executable paths when a command is not on `PATH`. On Windows, TOML literal strings such as `cwd = 'C:\servers\filesystem'` avoid escaping backslashes.
 
-Servers do **not** inherit your full environment. Their baseline contains only the daemon's `PATH` (plus `SystemRoot` and `WINDIR` on Windows); add other required variables explicitly under `[servers.<name>.env]`. For example:
+Servers do **not** inherit your full environment. Their baseline contains the daemon's `PATH` (plus `SystemRoot` and `WINDIR` on Windows). On Windows it also includes `USERPROFILE`, `HOMEDRIVE`, `HOMEPATH`, `APPDATA`, `LOCALAPPDATA`, `HOME`, `TEMP`, and `TMP` when the daemon has them. `HOME` is filled from `USERPROFILE` when it came from neither the environment nor `[servers.<name>.env]`. Add other required variables explicitly under `[servers.<name>.env]`. For example:
 
 ```toml
 [servers.filesystem.env]
