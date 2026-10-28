@@ -108,18 +108,19 @@ func (adapter *execAdapter) Start(ctx context.Context, name string, proxy config
 }
 
 func isolatedEnvironment(configured map[string]string) []string {
-	environment := make(map[string]string, len(configured)+3)
-	baseline := []string{"PATH"}
-	if runtime.GOOS == "windows" {
-		baseline = append(baseline, "SystemRoot", "WINDIR")
-	}
+	return isolatedEnvironmentFor(runtime.GOOS, os.LookupEnv, configured)
+}
+
+func isolatedEnvironmentFor(goos string, lookup func(string) (string, bool), configured map[string]string) []string {
+	baseline := environmentBaseline(goos)
+	environment := make(map[string]string, len(baseline)+len(configured)+1)
 	for _, key := range baseline {
-		if value, exists := os.LookupEnv(key); exists {
+		if value, exists := lookup(key); exists {
 			environment[key] = value
 		}
 	}
 	for key, value := range configured {
-		if runtime.GOOS == "windows" {
+		if goos == "windows" {
 			for existing := range environment {
 				if strings.EqualFold(key, existing) {
 					delete(environment, existing)
@@ -127,6 +128,14 @@ func isolatedEnvironment(configured map[string]string) []string {
 			}
 		}
 		environment[key] = value
+	}
+	if goos == "windows" {
+		_, homeConfigured := configured["HOME"]
+		home, homeExists := environment["HOME"]
+		profile, profileExists := foldedEnvironmentValue(environment, "USERPROFILE")
+		if !homeConfigured && (!homeExists || home == "") && profileExists && profile != "" {
+			environment["HOME"] = profile
+		}
 	}
 	keys := make([]string, 0, len(environment))
 	for key := range environment {
@@ -138,6 +147,34 @@ func isolatedEnvironment(configured map[string]string) []string {
 		result = append(result, key+"="+environment[key])
 	}
 	return result
+}
+
+func environmentBaseline(goos string) []string {
+	if goos == "windows" {
+		return []string{
+			"PATH",
+			"SystemRoot",
+			"WINDIR",
+			"USERPROFILE",
+			"HOMEDRIVE",
+			"HOMEPATH",
+			"APPDATA",
+			"LOCALAPPDATA",
+			"HOME",
+			"TEMP",
+			"TMP",
+		}
+	}
+	return []string{"PATH"}
+}
+
+func foldedEnvironmentValue(environment map[string]string, key string) (string, bool) {
+	for existing, value := range environment {
+		if strings.EqualFold(existing, key) {
+			return value, true
+		}
+	}
+	return "", false
 }
 
 type execProcess struct {
