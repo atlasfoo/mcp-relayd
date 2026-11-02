@@ -22,7 +22,14 @@ Using several agents or client sessions often means duplicating MCP server comma
 
 ### 1. Install mcp-relayd
 
-Download the archive for your OS and CPU architecture, plus `SHA256SUMS`, from [GitHub Releases](https://github.com/atlasfoo/mcp-relayd/releases). Put both files in the same directory and verify the archive before extracting it:
+Install the daemon using the automated install scripts:
+
+- On Linux or macOS, run `scripts/install.sh`.
+- On Windows (PowerShell), run `scripts/install.ps1`.
+
+Both `scripts/install.sh` and `scripts/install.ps1` download a verified GitHub release into `~/.local/bin` by default, and warn if that directory is not on `PATH`.
+
+Alternatively, download the archive for your OS and CPU architecture, plus `SHA256SUMS`, from [GitHub Releases](https://github.com/atlasfoo/mcp-relayd/releases). Put both files in the same directory and verify the archive before extracting it:
 
 ```sh
 sha256sum -c --ignore-missing SHA256SUMS
@@ -52,14 +59,22 @@ Ensure `mcp-proxy` is on your `PATH`; if needed, run `uv tool update-shell` and 
 
 ### 3. Create your configuration
 
-Create the parent directory if needed, then save your configuration at:
+Run `mcp-relayd config` to write the default configuration template:
+
+```sh
+mcp-relayd config
+```
+
+`mcp-relayd config` writes the example to the default path and refuses to overwrite an existing file.
+
+The default configuration file is placed at:
 
 | Platform | Default configuration file |
 | --- | --- |
 | Linux/macOS | `~/.config/mcp-relayd.toml` |
 | Windows | `%USERPROFILE%\.config\mcp-relayd.toml` |
 
-Start with this example or copy [`examples/mcp-relayd.toml`](examples/mcp-relayd.toml). Replace the command, arguments, and working directory with those of your installed stdio MCP server; `server.js` below is a placeholder, not a bundled server.
+You can also start with this example or copy [`examples/mcp-relayd.toml`](examples/mcp-relayd.toml). Replace the command, arguments, and working directory with those of your installed stdio MCP server; `server.js` below is a placeholder, not a bundled server.
 
 ```toml
 [gateway]
@@ -88,7 +103,9 @@ mcp-relayd run
 mcp-relayd run --config ./mcp-relayd.toml
 ```
 
-The daemon does not generate a configuration file or fall back to another location if it is missing or invalid. A relative `--config` path is resolved from the directory where you run the command.
+The daemon runs with `mcp-relayd run` and stays in the foreground. `--config` may appear before or after `run`. A relative `--config` path is resolved from the directory where you run the command.
+
+A normal run prints the ASCII greeting and `Local:` lines with each ready server URL. stdout of `run` stays empty. JSON diagnostic logs appear only with `--verbose`. `--verbose` has no `-v` alias.
 
 In your MCP client's settings, add a remote/HTTP server using:
 
@@ -142,7 +159,7 @@ mcp-relayd --help
 mcp-relayd --version
 ```
 
-`/health` returns JSON with overall status and each server's name, state (`STARTING`, `READY`, `STOPPED`, `STOPPING`, or `FAILED`), and proxy PID when available. `--help` and `--version` work without a configuration file; the latter prints the build version and source SHA. Startup and bridge errors are written as structured JSON logs to stderr.
+`/health` returns JSON with overall status and each server's name, state (`STARTING`, `READY`, `STOPPED`, `STOPPING`, or `FAILED`), and proxy PID when available. `--help` and `--version` do not load configuration; `--version` prints the build version and source SHA. JSON diagnostic logs appear only with `--verbose`. `--verbose` has no `-v` alias.
 
 | Problem | What to check |
 | --- | --- |

@@ -17,11 +17,10 @@ import (
 	"time"
 )
 
-func TestRuntimeSmoke(t *testing.T) {
-	proxy := realProxy(t)
-	directory := t.TempDir()
-	fixture := filepath.Join(directory, "stdio-mcp")
-	daemonPath := filepath.Join(directory, "mcp-relayd")
+func buildBinaries(t *testing.T, directory string) (daemonPath, fixture string) {
+	t.Helper()
+	fixture = filepath.Join(directory, "stdio-mcp")
+	daemonPath = filepath.Join(directory, "mcp-relayd")
 	if runtime.GOOS == "windows" {
 		fixture += ".exe"
 		daemonPath += ".exe"
@@ -38,6 +37,13 @@ func TestRuntimeSmoke(t *testing.T) {
 			t.Fatalf("build %s: %v: %s", build.name, err, output)
 		}
 	}
+	return daemonPath, fixture
+}
+
+func TestRuntimeSmoke(t *testing.T) {
+	proxy := realProxy(t)
+	directory := t.TempDir()
+	daemonPath, fixture := buildBinaries(t, directory)
 	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -176,6 +182,226 @@ args = ["--identity", "runtime-smoke", "--event-file", %q]
 		_ = response.Body.Close()
 		t.Errorf("health remained reachable after shutdown: HTTP %d", response.StatusCode)
 	}
+
+	capturedLogs := logs.String()
+	greeting := loadGreeting(t)
+	if !strings.HasPrefix(capturedLogs, string(greeting)) {
+		t.Errorf("normal run logs do not start with greeting; got:\n%s", capturedLogs)
+	}
+	wantLocal := fmt.Sprintf("Local: http://127.0.0.1:%s/mcp/fixture", portText)
+	if !strings.Contains(capturedLogs, wantLocal) {
+		t.Errorf("normal run logs missing %q; got:\n%s", wantLocal, capturedLogs)
+	}
+	if !strings.Contains(capturedLogs, "server fixture ready") {
+		t.Errorf("normal run logs missing \"server fixture ready\"; got:\n%s", capturedLogs)
+	}
+	for line := range strings.SplitSeq(capturedLogs, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		var record map[string]any
+		if json.Unmarshal([]byte(trimmed), &record) == nil {
+			t.Errorf("normal run emitted JSON log line: %q", trimmed)
+		}
+	}
+}
+
+func TestRuntimeVerbose(t *testing.T) {
+	proxy := realProxy(t)
+	directory := t.TempDir()
+	daemonPath, fixture := buildBinaries(t, directory)
+
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "verbose_before_run", args: []string{"--verbose", "run"}},
+		{name: "verbose_after_run", args: []string{"run", "--verbose"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			subDir := t.TempDir()
+			listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp4", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, portText, err := net.SplitHostPort(listener.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = listener.Close()
+			port, err := strconv.Atoi(portText)
+			if err != nil {
+				t.Fatal(err)
+			}
+			configPath := filepath.Join(subDir, "runtime.toml")
+			eventFile := filepath.Join(subDir, "fixture-events.jsonl")
+			configText := fmt.Sprintf(`[gateway]
+host = "127.0.0.1"
+port = %d
+shutdown_timeout = "5s"
+
+[proxy]
+command = %q
+startup_timeout = "10s"
+
+[servers.fixture]
+command = %q
+args = ["--identity", "runtime-verbose", "--event-file", %q]
+`, port, proxy, fixture, eventFile)
+			if err := os.WriteFile(configPath, []byte(configText), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			processContext, cancelProcess := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancelProcess()
+
+			cmdArgs := append(append([]string{}, tc.args...), "--config", configPath)
+			command := exec.CommandContext(processContext, daemonPath, cmdArgs...) // #nosec G204 -- Executable and config created in temp dir.
+			var stdout, stderr bytes.Buffer
+			command.Stdout = &stdout
+			command.Stderr = &stderr
+			if err := command.Start(); err != nil {
+				t.Fatal(err)
+			}
+			waited := false
+			defer func() {
+				if !waited {
+					_ = command.Process.Kill()
+					_ = command.Wait()
+				}
+			}()
+
+			waitContext, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			baseURL := "http://127.0.0.1:" + portText
+			if err := waitForHTTP(waitContext, baseURL+"/health"); err != nil {
+				t.Fatalf("daemon did not become healthy: %v; stderr: %s", err, stderr.String())
+			}
+
+			request, err := http.NewRequestWithContext(testContext(t), http.MethodGet, baseURL+"/health", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			healthResponse, err := (&http.Client{Timeout: time.Second}).Do(request) // #nosec G107 -- Local daemon on ephemeral loopback port.
+			if err != nil {
+				t.Fatal(err)
+			}
+			var health struct {
+				Status  string `json:"status"`
+				Servers []struct {
+					Name  string `json:"name"`
+					State string `json:"state"`
+				} `json:"servers"`
+			}
+			if err := json.NewDecoder(healthResponse.Body).Decode(&health); err != nil {
+				_ = healthResponse.Body.Close()
+				t.Fatal(err)
+			}
+			_ = healthResponse.Body.Close()
+			if health.Status != "ok" || len(health.Servers) != 1 || health.Servers[0].Name != "fixture" || health.Servers[0].State != "READY" {
+				t.Fatalf("health = %+v, want fixture READY", health)
+			}
+
+			if err := command.Process.Signal(os.Interrupt); err != nil {
+				t.Fatalf("signal daemon: %v", err)
+			}
+			finished := make(chan error, 1)
+			go func() { finished <- command.Wait() }()
+			select {
+			case err := <-finished:
+				waited = true
+				if err != nil {
+					t.Fatalf("daemon exit: %v; stderr: %s", err, stderr.String())
+				}
+			case <-time.After(8 * time.Second):
+				_ = command.Process.Kill()
+				_ = command.Wait()
+				waited = true
+				t.Fatalf("daemon failed to stop within bounded deadline; stderr: %s", stderr.String())
+			}
+
+			cleanupContext, cancelCleanupWait := context.WithTimeout(context.Background(), time.Second)
+			defer cancelCleanupWait()
+			if err := waitForFixtureEvent(cleanupContext, eventFile, "stopped"); err != nil {
+				t.Errorf("fixture process was not cleaned up: %v", err)
+			}
+
+			request, err = http.NewRequestWithContext(context.Background(), http.MethodGet, baseURL+"/health", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response, err := (&http.Client{Timeout: time.Second}).Do(request); err == nil {
+				_ = response.Body.Close()
+				t.Errorf("health remained reachable after shutdown: HTTP %d", response.StatusCode)
+			}
+
+			stderrText := stderr.String()
+			if strings.Contains(stderrText, "gateway listening on") {
+				t.Errorf("verbose stderr contains human phrase %q", "gateway listening on")
+			}
+			if strings.Contains(stderrText, "startup complete:") {
+				t.Errorf("verbose stderr contains human phrase %q", "startup complete:")
+			}
+			if strings.Contains(stderrText, "Local:") {
+				t.Errorf("verbose stderr contains human phrase %q", "Local:")
+			}
+			if strings.Contains(stderrText, string(loadGreeting(t))) {
+				t.Errorf("verbose stderr contains greeting")
+			}
+
+			if stdout.Len() != 0 {
+				t.Errorf("verbose stdout = %q, want empty", stdout.String())
+			}
+
+			lines := strings.Split(strings.TrimSpace(stderrText), "\n")
+			if len(lines) == 0 || lines[0] == "" {
+				t.Fatalf("stderr is empty, want JSON log lines")
+			}
+			for i, line := range lines {
+				trimmed := strings.TrimSpace(line)
+				if trimmed == "" {
+					continue
+				}
+				var record map[string]any
+				if err := json.Unmarshal([]byte(trimmed), &record); err != nil {
+					t.Errorf("stderr line %d is not valid JSON: %v (line: %q)", i, err, trimmed)
+				}
+			}
+		})
+	}
+}
+
+func loadGreeting(t *testing.T) []byte {
+	t.Helper()
+	candidates := []string{
+		filepath.Join("..", "..", "greeting.txt"),
+		filepath.Join("..", "..", "internal", "cli", "greeting.txt"),
+	}
+	for _, path := range candidates {
+		if data, err := os.ReadFile(path); err == nil { // #nosec G304 -- Test reads static greeting file from repository.
+			return data
+		}
+	}
+	dir, err := os.Getwd()
+	if err == nil {
+		for {
+			if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+				for _, rel := range []string{"greeting.txt", filepath.Join("internal", "cli", "greeting.txt")} {
+					if data, err := os.ReadFile(filepath.Join(dir, rel)); err == nil { // #nosec G304
+						return data
+					}
+				}
+				break
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
+	}
+	t.Fatal("could not find greeting.txt in repository root or internal/cli")
+	return nil
 }
 
 func waitForFixtureEvent(ctx context.Context, path, name string) error {
