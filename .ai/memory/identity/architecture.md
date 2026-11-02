@@ -1,20 +1,20 @@
 ---
 type: architecture
 title: "Architecture"
-description: "A Go daemon with strict TOML configuration, supervised external MCP bridges and a loopback HTTP gateway."
+description: "A Go daemon with strict TOML configuration, a urfave/cli process entry, supervised external MCP bridges and a loopback HTTP gateway."
 tags: [identity, architecture, go, devenv]
-updated: "2026-10-12"
+updated: "2026-11-02"
 ---
 
 # Architecture
 
 - **Architecture style:** One Go daemon supervises a separate external mcp-proxy process per enabled server; each bridge owns one stdio upstream shared by client sessions.
 - **Primary language:** Go 1.25.0 minimum, declared in `go.mod`.
-- **Primary framework:** Go standard library; no application framework is configured.
+- **Primary framework:** Go standard library for the relay. [urfave/cli v3](../references/urfave-cli.md) builds only the process command tree, per [ADR-004](../decisions/004-urfave-cli-and-controlled-output.md).
 - **Persistence:** None.
-- **Key packages:** `net/http`, `httputil.ReverseProxy` and `log/slog`; [go-toml/v2](../references/go-toml.md) for strict configuration and [Windows APIs](../references/windows-processes.md) through x/sys. YAML parsing is used by workflow contract tests, not runtime.
+- **Key packages:** `net/http`, `httputil.ReverseProxy` and `log/slog`; [go-toml/v2](../references/go-toml.md) for strict configuration, [urfave/cli v3](../references/urfave-cli.md) for process commands, and [Windows APIs](../references/windows-processes.md) through x/sys. YAML parsing is used by workflow contract tests, not runtime.
 
-The small CLI entry point is `cmd/mcp-relayd/main.go`. `internal/config` loads global user configuration, `internal/process` handles lifecycle and process trees, `internal/gateway` validates local HTTP and forwards MCP routes, and `internal/app` composes signal-aware startup/shutdown. There is no automatic restart or lazy startup. Health and per-server routes remain separate.
+`cmd/mcp-relayd/main.go` owns signals and process exit. `internal/cli` builds a fresh command tree per invocation and does not get imported by the relay core. `internal/config` loads global user configuration, `internal/process` handles lifecycle and process trees, `internal/gateway` validates local HTTP and forwards MCP routes, and `internal/app` composes signal-aware startup/shutdown. There is no automatic restart or lazy startup. Health and per-server routes remain separate.
 
 [mcp-proxy](../references/mcp-proxy.md) remains an external Python runtime, not part of the Go binary. `devenv.nix` supplies the locked development/CI environment with `GOTOOLCHAIN=local`; [just](../references/just.md) shares build/release recipes across local use and GitHub Actions.
 
