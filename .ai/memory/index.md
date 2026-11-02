@@ -3,7 +3,7 @@ type: index
 title: "mcp-relayd — memory index"
 description: "Entry point to this repository's constitutive memory."
 tags: [index]
-updated: "2026-10-12"
+updated: "2026-11-02"
 ---
 
 # mcp-relayd — Memory Index
@@ -37,6 +37,7 @@ updated: "2026-10-12"
 - [ADR-001 — Adoption of the JAIBA brain structure](decisions/001-jaiba-brain-adoption.md) — The project keeps agent-facing memory in .ai/ under the JAIBA framework.
 - [ADR-002 — Locked external MCP bridge](decisions/002-locked-external-mcp-bridge.md) — Use a separately provisioned, hash-locked mcp-proxy bridge until a native bridge is implemented.
 - [ADR-003 — Build-owned versioning and trusted publication](decisions/003-build-owned-versioning-and-trusted-publication.md) — Build prepares the version and publishes verified refs after upload; reusable Release only publishes assets.
+- [ADR-004 — urfave/cli v3 and controlled process output](decisions/004-urfave-cli-and-controlled-output.md) — Use urfave/cli v3 for the process CLI, with instance-local help and JSON logs only under --verbose.
 
 ## `reference`
 
@@ -53,6 +54,7 @@ updated: "2026-10-12"
 - [MCP Streamable HTTP](references/mcp.md) — MCP transport contract for per-server loopback HTTP routes and shared stdio upstreams.
 - [Product roadmap](references/product-roadmap.md) — Vendored product vision defining the daemon phases and six distribution targets.
 - [typos](references/typos.md) — English spelling and filename checks configured in .typos.toml.
+- [urfave/cli](references/urfave-cli.md) — urfave/cli v3 builds the process command tree without mutating package globals.
 - [Windows process containment](references/windows-processes.md) — Windows console groups and Job Objects contain supervised bridge descendants through x/sys.
 
 ## `log-entry`

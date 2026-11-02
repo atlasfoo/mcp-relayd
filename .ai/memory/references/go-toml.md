@@ -7,7 +7,7 @@ kind: package
 role: upstream
 resource: "URL: https://github.com/pelletier/go-toml"
 tags: [config, toml, go]
-updated: "2026-10-07"
+updated: "2026-11-02"
 ---
 
 # go-toml/v2
@@ -26,4 +26,4 @@ Consult upstream decoder documentation and `internal/config/config_test.go`. `ex
 
 ## Gotchas
 
-Missing config/home/environment variables are errors; there is no cwd fallback or generated empty configuration. Diagnostics must not expose configured environment values.
+`Load` still errors when the file, home or an environment variable is missing. There is no cwd fallback. `mcp-relayd config` can write the example to the default path and refuses to overwrite an existing file. Diagnostics must not expose configured environment values.
