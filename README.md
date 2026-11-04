@@ -93,6 +93,9 @@ The default configuration file is placed at:
 You can also start with this example or copy [`examples/mcp-relayd.toml`](examples/mcp-relayd.toml). Replace the command, arguments, and working directory with those of your installed stdio MCP server; `server.js` below is a placeholder, not a bundled server.
 
 ```toml
+# :schema https://raw.githubusercontent.com/atlasfoo/mcp-relayd/master/schema/mcp-relayd.schema.json
+"$schema" = "https://raw.githubusercontent.com/atlasfoo/mcp-relayd/master/schema/mcp-relayd.schema.json"
+
 [gateway]
 host = "127.0.0.1"
 port = 9876
@@ -140,6 +143,7 @@ The TOML file has three sections: `[gateway]` for the HTTP listener, `[proxy]` f
 
 | TOML field | Type | Default | Validation / behavior |
 | --- | --- | --- | --- |
+| `"$schema"` | string | optional | Optional URL or path to the configuration JSON schema for editor IntelliSense. |
 | `[gateway].host` | string | `"127.0.0.1"` | Loopback IP address, or `localhost` resolving exclusively to loopback addresses. |
 | `[gateway].port` | integer | `9876` | Integer from 1 through 65535. |
 | `[gateway].shutdown_timeout` | duration string | `"10s"` | Positive Go duration; global graceful-shutdown budget. |

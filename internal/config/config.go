@@ -44,7 +44,9 @@ type Server struct {
 }
 
 type fileConfig struct {
-	Gateway struct {
+	Schema    string `toml:"$schema"`
+	AltSchema string `toml:"schema"`
+	Gateway   struct {
 		Host            string `toml:"host"`
 		Port            int    `toml:"port"`
 		ShutdownTimeout string `toml:"shutdown_timeout"`

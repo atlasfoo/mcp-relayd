@@ -204,3 +204,41 @@ command = "echo"
 		})
 	}
 }
+
+func TestLoadAcceptsSchemaProperties(t *testing.T) {
+	testCases := []struct {
+		name    string
+		content string
+	}{
+		{
+			name: "dollar schema property",
+			content: `
+"$schema" = "https://raw.githubusercontent.com/atlasfoo/mcp-relayd/master/schema/mcp-relayd.schema.json"
+
+[servers.alpha]
+command = "node"
+`,
+		},
+		{
+			name: "bare schema property",
+			content: `
+schema = "https://raw.githubusercontent.com/atlasfoo/mcp-relayd/master/schema/mcp-relayd.schema.json"
+
+[servers.alpha]
+command = "node"
+`,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Load(writeConfig(t, tc.content))
+			if err != nil {
+				t.Fatalf("Load() error = %v, want successful load with schema property", err)
+			}
+			if got.Servers["alpha"].Command != "node" {
+				t.Errorf("Servers[alpha].Command = %q, want node", got.Servers["alpha"].Command)
+			}
+		})
+	}
+}
