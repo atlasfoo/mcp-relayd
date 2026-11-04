@@ -1,0 +1,106 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/atlasfoo/mcp-relayd/master/schema/mcp-relayd.schema.json",
+  "title": "mcp-relayd configuration",
+  "description": "Configuration schema for the mcp-relayd daemon",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "URL or path to the mcp-relayd configuration schema"
+    },
+    "schema": {
+      "type": "string",
+      "description": "Alternative property for the configuration schema URL or path"
+    },
+    "gateway": {
+      "type": "object",
+      "description": "Public loopback listener settings and shutdown budget",
+      "properties": {
+        "host": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "description": "Loopback IP address or localhost resolving exclusively to loopback"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 9876,
+          "description": "TCP port number for the HTTP gateway listener"
+        },
+        "shutdown_timeout": {
+          "type": "string",
+          "default": "10s",
+          "description": "Positive Go duration defining the graceful shutdown timeout (e.g. 10s, 1m)"
+        }
+      },
+      "additionalProperties": false
+    },
+    "proxy": {
+      "type": "object",
+      "description": "External MCP bridge proxy settings",
+      "properties": {
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "default": "mcp-proxy",
+          "description": "Command or path for the external bridge proxy executable"
+        },
+        "startup_timeout": {
+          "type": "string",
+          "default": "30s",
+          "description": "Positive Go duration defining the proxy startup timeout (e.g. 30s, 1m)"
+        }
+      },
+      "additionalProperties": false
+    },
+    "servers": {
+      "type": "object",
+      "description": "Upstream stdio MCP servers keyed by unique route-safe server name",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "command"
+        ],
+        "properties": {
+          "command": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Command executable to run for the upstream server"
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": [],
+            "description": "Command-line arguments for the server command"
+          },
+          "cwd": {
+            "type": "string",
+            "default": "",
+            "description": "Working directory for the server process (empty uses daemon working directory)"
+          },
+          "autostart": {
+            "type": "boolean",
+            "default": true,
+            "description": "Whether to start this server automatically on daemon launch"
+          },
+          "env": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Environment variables with ${VAR} expansion support from daemon process environment"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

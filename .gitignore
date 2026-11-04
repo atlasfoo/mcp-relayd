@@ -13,6 +13,9 @@ devenv.local.yaml
 /bin/
 /coverage.out
 
+# CodeGraph
+/.codegraph/
+
 # Python provisioning tool bytecode
 /scripts/__pycache__/
 /tooling/__pycache__/

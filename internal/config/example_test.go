@@ -1,6 +1,8 @@
 package config
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -32,5 +34,31 @@ func TestExampleConfigurationLoadsAndValidates(t *testing.T) {
 	}
 	if server.Env["NODE_ENV"] != "production" {
 		t.Errorf("Servers[example].Env[NODE_ENV] = %q, want production", server.Env["NODE_ENV"])
+	}
+}
+
+func TestSchemaFileIsValidJSON(t *testing.T) {
+	path := filepath.Join("..", "..", "schema", "mcp-relayd.schema.json")
+	data, err := os.ReadFile(path) // #nosec G304 -- test reads static schema file
+	if err != nil {
+		t.Fatalf("ReadFile(schema) error = %v", err)
+	}
+
+	var schema map[string]any
+	if err := json.Unmarshal(data, &schema); err != nil {
+		t.Fatalf("json.Unmarshal(schema) error = %v", err)
+	}
+
+	if schema["$schema"] != "http://json-schema.org/draft-07/schema#" {
+		t.Errorf("schema.$schema = %v, want http://json-schema.org/draft-07/schema#", schema["$schema"])
+	}
+	props, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("schema.properties missing or not an object")
+	}
+	for _, expectedProp := range []string{"$schema", "schema", "gateway", "proxy", "servers"} {
+		if _, exists := props[expectedProp]; !exists {
+			t.Errorf("schema.properties missing %q", expectedProp)
+		}
 	}
 }

@@ -1,0 +1,5 @@
+schema.enabled = true
+
+[[rule]]
+include = ["**/mcp-relayd.toml", "examples/*.toml"]
+schema = "schema/mcp-relayd.schema.json"

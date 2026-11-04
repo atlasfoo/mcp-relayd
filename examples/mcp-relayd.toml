@@ -1,3 +1,6 @@
+# :schema https://raw.githubusercontent.com/atlasfoo/mcp-relayd/master/schema/mcp-relayd.schema.json
+"$schema" = "https://raw.githubusercontent.com/atlasfoo/mcp-relayd/master/schema/mcp-relayd.schema.json"
+
 # Example configuration for mcp-relayd.
 # Environment values are expanded from the daemon's process environment.
 
