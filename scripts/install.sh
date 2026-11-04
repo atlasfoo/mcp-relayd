@@ -185,6 +185,7 @@ else
     MATCH_LINE=$(awk -v pattern="_${OS}_${ARCH}.${SUFFIX}\$" '$2 ~ pattern { print $1, $2 }' "$TEMP_DIR/SHA256SUMS")
     EXPECTED_HASH=$(printf '%s' "$MATCH_LINE" | awk '{print $1}')
     ASSET_NAME=$(printf '%s' "$MATCH_LINE" | awk '{print $2}')
+    ASSET_NAME="${ASSET_NAME#\*}"
 fi
 
 case "$EXPECTED_HASH" in

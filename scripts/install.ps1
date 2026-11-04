@@ -11,7 +11,28 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-if ($Destination -match '^v?[0-9]+\.[0-9]+' -and $Tag -eq "latest") {
+function Terminate-Script {
+    param(
+        [string]$Message,
+        [int]$ExitCode = 1
+    )
+
+    if (-not $PSCommandPath) {
+        # Running via iex or pipeline: throw avoids terminating the interactive caller's host shell
+        if ($Message) {
+            throw $Message
+        } else {
+            throw "Script failed with exit code $ExitCode"
+        }
+    }
+
+    if ($Message) {
+        [Console]::Error.WriteLine($Message)
+    }
+    exit $ExitCode
+}
+
+if ($Destination -match '^(latest|v?[0-9]+\.[0-9]+)' -and $Tag -eq "latest") {
     $Tag = $Destination
     $Destination = $null
 }
@@ -53,8 +74,7 @@ if ($IsWindows -or $env:OS -eq "Windows_NT" -or [System.Environment]::OSVersion.
 }
 
 if (-not $detectedOs) {
-    [Console]::Error.WriteLine("Error: Unsupported operating system (only linux, darwin, windows are supported)")
-    exit 1
+    Terminate-Script "Error: Unsupported operating system (only linux, darwin, windows are supported)"
 }
 
 $detectedArch = $null
@@ -70,8 +90,7 @@ if ($archStr -match '^(X64|AMD64)$') {
 } elseif ($archStr -match '^(Arm64|ARM64)$') {
     $detectedArch = "arm64"
 } else {
-    [Console]::Error.WriteLine("Error: Unsupported architecture: $archStr (only amd64, arm64 are supported)")
-    exit 1
+    Terminate-Script "Error: Unsupported architecture: $archStr (only amd64, arm64 are supported)"
 }
 
 if ($detectedOs -eq "windows") {
@@ -89,8 +108,7 @@ function Download-File {
     )
 
     if (-not $Url.StartsWith("https://", [System.StringComparison]::OrdinalIgnoreCase)) {
-        [Console]::Error.WriteLine("Error: Insecure download URL rejected: $Url (HTTPS required)")
-        exit 1
+        Terminate-Script "Error: Insecure download URL rejected: $Url (HTTPS required)"
     }
 
     try {
@@ -99,12 +117,7 @@ function Download-File {
         [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
     }
 
-    try {
-        Invoke-WebRequest -Uri $Url -OutFile $OutputFile -UseBasicParsing
-    } catch {
-        [Console]::Error.WriteLine("Error: Failed to download ${Url}: $_")
-        exit 1
-    }
+    Invoke-WebRequest -Uri $Url -OutFile $OutputFile -UseBasicParsing
 }
 
 $repoUrl = "https://github.com/atlasfoo/mcp-relayd"
@@ -132,9 +145,13 @@ try {
         if ($Tag -ne "latest" -and $releaseTag -ne $Tag) {
             $sumsUrl = "$repoUrl/releases/download/$Tag/SHA256SUMS"
             $baseDownloadUrl = "$repoUrl/releases/download/$Tag"
-            Download-File -Url $sumsUrl -OutputFile $sumsFile
+            try {
+                Download-File -Url $sumsUrl -OutputFile $sumsFile
+            } catch {
+                Terminate-Script "Error: Failed to download SHA256SUMS from ${sumsUrl}: $_"
+            }
         } else {
-            throw
+            Terminate-Script "Error: Failed to download SHA256SUMS from ${sumsUrl}: $_"
         }
     }
 
@@ -177,20 +194,21 @@ try {
     }
 
     if (-not $expectedHash -or -not $assetName -or $expectedHash.Length -ne 64 -or -not ($expectedHash -match '^[0-9a-fA-F]{64}$')) {
-        [Console]::Error.WriteLine("Error: Checksum for asset ${detectedOs}/${detectedArch} (${suffix}) not found or invalid in SHA256SUMS")
-        exit 1
+        Terminate-Script "Error: Checksum for asset ${detectedOs}/${detectedArch} (${suffix}) not found or invalid in SHA256SUMS"
     }
 
     $assetFile = Join-Path $tempDir $assetName
     $assetUrl = "$baseDownloadUrl/$assetName"
-    Download-File -Url $assetUrl -OutputFile $assetFile
+    try {
+        Download-File -Url $assetUrl -OutputFile $assetFile
+    } catch {
+        Terminate-Script "Error: Failed to download asset from ${assetUrl}: $_"
+    }
 
     $actualHash = (Get-FileHash -Path $assetFile -Algorithm SHA256).Hash.ToLower()
     if ($actualHash -ne $expectedHash) {
-        [Console]::Error.WriteLine("Error: Checksum mismatch for $assetName")
-        [Console]::Error.WriteLine("Expected: $expectedHash")
-        [Console]::Error.WriteLine("Actual:   $actualHash")
-        exit 1
+        $mismatchMsg = "Error: Checksum mismatch for $assetName`nExpected: $expectedHash`nActual:   $actualHash"
+        Terminate-Script $mismatchMsg
     }
 
     $extractDir = Join-Path $tempDir "extracted"
@@ -204,8 +222,7 @@ try {
 
     $extractedExe = Join-Path $extractDir $exeName
     if (-not (Test-Path -Path $extractedExe)) {
-        [Console]::Error.WriteLine("Error: Executable $exeName was not found in archive $assetName")
-        exit 1
+        Terminate-Script "Error: Executable $exeName was not found in archive $assetName"
     }
 
     if (-not (Test-Path -Path $Destination)) {
