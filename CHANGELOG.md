@@ -1,3 +1,13 @@
+## v0.2.0 (2026-11-04)
+
+### Feat
+
+- **cli**: add a controlled command line and release installers
+
+### Fix
+
+- **scripts**: address install script issues from review
+
 ## v0.1.2 (2026-10-28)
 
 ### Fix
