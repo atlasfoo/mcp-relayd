@@ -243,7 +243,7 @@ try {
     Write-Host ""
     Write-Host "Next steps:"
     Write-Host "1. Run 'mcp-relayd config' to generate a default configuration file."
-    Write-Host "2. Refer to https://github.com/atlasfoo/mcp-relayd/blob/main/README.md for setup and usage instructions."
+    Write-Host "2. Refer to https://github.com/atlasfoo/mcp-relayd/blob/master/README.md for setup and usage instructions."
 } finally {
     Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
 }
