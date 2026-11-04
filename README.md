@@ -22,12 +22,28 @@ Using several agents or client sessions often means duplicating MCP server comma
 
 ### 1. Install mcp-relayd
 
-Install the daemon using the automated install scripts:
+Install the latest release with a single command:
 
-- On Linux or macOS, run `scripts/install.sh`.
-- On Windows (PowerShell), run `scripts/install.ps1`.
+**Linux / macOS:**
 
-Both `scripts/install.sh` and `scripts/install.ps1` download a verified GitHub release into `~/.local/bin` by default, and warn if that directory is not on `PATH`.
+```sh
+curl -fsSL https://raw.githubusercontent.com/atlasfoo/mcp-relayd/master/scripts/install.sh | bash
+```
+
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/atlasfoo/mcp-relayd/master/scripts/install.ps1 | iex
+```
+
+Both `scripts/install.sh` and `scripts/install.ps1` download a verified release from [GitHub Releases](https://github.com/atlasfoo/mcp-relayd/releases) into `~/.local/bin` (`%USERPROFILE%\.local\bin` on Windows) by default, verify its checksum against `SHA256SUMS`, and warn if that directory is not on `PATH`.
+
+You can also run the scripts locally from a cloned repository (e.g. `scripts/install.sh` or `scripts/install.ps1`), or pass a custom installation directory and release tag as arguments:
+
+```sh
+# Linux / macOS with custom directory:
+curl -fsSL https://raw.githubusercontent.com/atlasfoo/mcp-relayd/master/scripts/install.sh | bash -s -- /custom/bin
+```
 
 Alternatively, download the archive for your OS and CPU architecture, plus `SHA256SUMS`, from [GitHub Releases](https://github.com/atlasfoo/mcp-relayd/releases). Put both files in the same directory and verify the archive before extracting it:
 
