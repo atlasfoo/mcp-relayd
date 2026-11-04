@@ -1,3 +1,9 @@
+## v0.3.0 (2026-11-04)
+
+### Feat
+
+- **config**: add JSON Schema for TOML configuration and editor intellisense
+
 ## v0.2.0 (2026-11-04)
 
 ### Feat
