@@ -150,7 +150,8 @@ func isolatedEnvironmentFor(goos string, lookup func(string) (string, bool), con
 }
 
 func environmentBaseline(goos string) []string {
-	if goos == "windows" {
+	switch goos {
+	case "windows":
 		return []string{
 			"PATH",
 			"SystemRoot",
@@ -164,8 +165,31 @@ func environmentBaseline(goos string) []string {
 			"TEMP",
 			"TMP",
 		}
+	case "linux":
+		return append(unixUserDirectoryBaseline(),
+			"DISPLAY",
+			"WAYLAND_DISPLAY",
+			"XAUTHORITY",
+			"DBUS_SESSION_BUS_ADDRESS",
+		)
+	case "darwin":
+		return unixUserDirectoryBaseline()
+	default:
+		return []string{"PATH"}
 	}
-	return []string{"PATH"}
+}
+
+func unixUserDirectoryBaseline() []string {
+	return []string{
+		"PATH",
+		"HOME",
+		"XDG_CONFIG_HOME",
+		"XDG_DATA_HOME",
+		"XDG_CACHE_HOME",
+		"XDG_STATE_HOME",
+		"XDG_RUNTIME_DIR",
+		"TMPDIR",
+	}
 }
 
 func foldedEnvironmentValue(environment map[string]string, key string) (string, bool) {
