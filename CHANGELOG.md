@@ -1,3 +1,9 @@
+## v0.3.1 (2026-11-05)
+
+### Fix
+
+- **process**: inherit Unix user and Linux session environment
+
 ## v0.3.0 (2026-11-04)
 
 ### Feat
